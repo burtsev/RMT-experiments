@@ -88,10 +88,19 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
         memory_state = None
-        segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
+        
+        if input_segmented:
+            n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
+            segmented = [dict(
+                input_ids=input_ids[:, i] if not (input_ids is None) else None, 
+                inputs_embeds=inputs_embeds[:, i] if not (inputs_embeds is None) else None, 
+                attention_mask=attention_mask[:, i]
+            ) for i in range(n_segs)]
+        else:
+            segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         cell_outputs = []
         for seg_num, segment in enumerate(segmented):
             cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True)
