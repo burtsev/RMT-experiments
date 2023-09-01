@@ -12,6 +12,8 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import wandb
+
 from transformers.optimization import get_scheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
@@ -216,8 +218,12 @@ class Trainer:
 
         self.tb = None
         # write tensorboard logs only from rank 0 and if model_path is specified
+        
         if self.accelerator.is_main_process and self.args.model_path is not None:
-            self.tb = SummaryWriter(log_dir=self.args.model_path)
+            if args.report_to == 'tb':
+                self.tb = SummaryWriter(log_dir=self.args.model_path)
+            elif args.report_to == 'wandb':
+                wandb.init()
 
         # move model to gpu
         self.model.to(self.device)
@@ -551,6 +557,8 @@ class Trainer:
                             self.tb.add_scalar(f'{k}/iterations/train', train_metrics[k], self.n_iter)
                             self.tb.add_scalar(f'{k}/samples/train', train_metrics[k],
                                                self.n_iter * self.global_batch_size)
+                        elif self.args.report_to == 'wandb':
+                            wandb.log({f'train/{k}': train_metrics[k]}, step=self.n_iter)
                     # log iteration time
                     if self.tb:
                         self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
@@ -561,15 +569,20 @@ class Trainer:
                         # adafactor uses external lr to compute its own lr if scale_parameter is true
                         # adafactor might not have external lr in case if relative_step is used
                         for p in ['lr', 'scaled_lr']:
-                            if p in param_group and param_group[p] is not None and self.tb:
-                                self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
-                                self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
+                            if p in param_group and param_group[p] is not None:
+                                if self.tb:
+                                    self.tb.add_scalar(f'{p}/iterations/param_group_{j}', param_group[p], self.n_iter)
+                                    self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
+                                elif self.args.report_to == 'wandb':
+                                    wandb.log({f'param_group_{j}/{p}': param_group[p]}, step=self.n_iter)
                     # log gradients global norm
                     gnorm = np.mean(global_grad_norms) if len(global_grad_norms) > 0 else 0
                     if self.tb:
                         self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
                         self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
+                    elif self.args.report_to == 'wandb':
+                        wandb.log({'gradient_global_norm': gnorm}, step=self.n_iter)
 
             # validation
             if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
@@ -610,8 +623,11 @@ class Trainer:
 
         # clean-up
         pbar.close()
-        if self.accelerator.is_main_process and self.tb:
-            self.tb.flush()
+        if self.accelerator.is_main_process:
+            if self.tb:
+                self.tb.flush()
+            elif self.args.report_to == 'wandb':
+                wandb.finish()
         logger.info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
@@ -643,6 +659,8 @@ class Trainer:
                 if self.tb and write_tb:
                     self.tb.add_scalar(f'{k}/iterations/{split}', metrics[k], self.n_iter)
                     self.tb.add_scalar(f'{k}/samples/{split}', metrics[k], self.n_iter * self.global_batch_size)
+                elif self.args.report_to == 'wandb':
+                    wandb.log({f'{split}/{k}': metrics[k]}, step=self.n_iter)
             if self.tb and write_tb:
                 self.tb.flush()
 

@@ -34,6 +34,7 @@ logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
 
 # import transformers  # noqa: E402
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser  # noqa: E402
+from peft import LoraConfig, TaskType, get_peft_model
 
 from lm_experiments_tools.utils import get_cls_by_name, get_optimizer, prepare_run  # noqa: E402
 
@@ -128,7 +129,7 @@ parser.add_argument('--adapter_bottleneck_dim', type=int, default=512, help='')
 parser.add_argument('--adapter_dropout', type=float, default=0.1, help='')
 parser.add_argument('--adapter_scale', type=float, default=4.0, help='')
 
-
+parser.add_argument('--report_to', type=str, default='wandb', help='')
 
 if __name__ == '__main__':
     args = parser.parse_args()
