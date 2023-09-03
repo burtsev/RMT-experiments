@@ -81,7 +81,6 @@ class MemoryCell(torch.nn.Module):
         return out, memory_state 
 
 
-import random
 class RecurrentWrapper(torch.nn.Module):
     def __init__(self, memory_cell, **rmt_kwargs):
         super().__init__()
@@ -202,3 +201,65 @@ class RecurrentWrapper(torch.nn.Module):
         
         memory_state = memory_state.detach()
         return False
+
+
+class Distillator(torch.nn.Module):
+    def __init__(self, teacher_model, student_model, alpha_distil):
+        super().__init__()
+        self.teacher = teacher_model
+        self.student = student_model
+        self.alpha = alpha_distil
+    
+    def forward(self, *args, **kwargs):
+        teacher_output = self.teacher(*args, **kwargs)
+        student_output = self.student(*args, **kwargs)
+
+        out = self.process_outputs(teacher_output, student_output, **kwargs)
+
+        return out
+                  
+    def process_outputs(self, teacher_output, student_output, **kwargs):
+        out = CausalLMOutputWithCrossAttentions()
+        teacher_logits = teacher_output.logits
+        student_logits = student_output.logits
+
+        for (k, v) in student_output.items():
+            out[k] = v
+            
+            teachers = teacher_output.get(k)
+            if teachers is not None:
+                out[f'teacher_{k}'] = teachers
+
+        labels = kwargs.get('labels')
+        if labels is not None:
+            shift_labels = labels[..., 1:].contiguous()
+            shift_logits = student_logits[..., :-1, :].contiguous()
+            shift_t_logits = teacher_logits[..., :-1, :].contiguous()
+
+            flat_labels = shift_labels.view(-1)
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_t_logits = shift_t_logits.view(-1, shift_t_logits.size(-1))
+            
+            loss_fct = CrossEntropyLoss()
+            labels_mask = kwargs.get('labels_mask')
+            if labels_mask is not None:
+                shift_mask = labels_mask[..., :-1].contiguous()
+
+                flat_labels = flat_labels[shift_mask.view(-1)]
+                flat_logits = flat_logits[shift_mask.view(-1)]
+                flat_t_logits = flat_t_logits[shift_mask.view(-1)]
+
+            dist_fct = torch.nn.KLDivLoss(reduction='batchmean', log_target=True)
+
+            log_sftmx_student = torch.log_softmax(flat_logits, dim=-1)  
+            log_sftmx_teacher = torch.log_softmax(flat_t_logits, dim=-1) 
+            dist = dist_fct(log_sftmx_student, log_sftmx_teacher)
+            ce_loss = loss_fct(flat_logits, flat_labels)
+            out['dist'] = dist
+            out['ce_loss'] = ce_loss
+            out['loss'] = ce_loss + self.alpha * dist
+            
+        else:
+            out['loss'] = 0
+
+        return out 
