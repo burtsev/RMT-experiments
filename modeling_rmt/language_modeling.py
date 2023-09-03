@@ -240,7 +240,6 @@ class Distillator(torch.nn.Module):
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
             flat_t_logits = shift_t_logits.view(-1, shift_t_logits.size(-1))
             
-            loss_fct = CrossEntropyLoss()
             labels_mask = kwargs.get('labels_mask')
             if labels_mask is not None:
                 shift_mask = labels_mask[..., :-1].contiguous()
@@ -254,10 +253,9 @@ class Distillator(torch.nn.Module):
             log_sftmx_student = torch.log_softmax(flat_logits, dim=-1)  
             log_sftmx_teacher = torch.log_softmax(flat_t_logits, dim=-1) 
             dist = dist_fct(log_sftmx_student, log_sftmx_teacher)
-            ce_loss = loss_fct(flat_logits, flat_labels)
             out['dist'] = dist
-            out['ce_loss'] = ce_loss
-            out['loss'] = ce_loss + self.alpha * dist
+            out['ce_loss'] = out['loss']
+            out['loss'] = (1 - self.alpha) * out['ce_loss'] + self.alpha * dist
             
         else:
             out['loss'] = 0
