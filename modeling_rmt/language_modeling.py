@@ -209,12 +209,33 @@ class Distillator(torch.nn.Module):
         self.teacher = teacher_model
         self.student = student_model
         self.alpha = alpha_distil
+        for p in self.teacher.parameters():
+            p.requires_grad = False
     
-    def forward(self, *args, **kwargs):
-        teacher_output = self.teacher(*args, **kwargs)
-        student_output = self.student(*args, **kwargs)
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
+        teacher_output = self.teacher(
+            input_ids,
+            labels=labels, 
+            inputs_embeds=inputs_embeds, 
+            attention_mask=attention_mask, 
+            output_attentions=output_attentions, 
+            output_hidden_states=output_hidden_states
+        )
+        student_output = self.student(
+            input_ids,
+            labels=labels,
+            labels_mask=labels_mask, 
+            inputs_embeds=inputs_embeds, 
+            attention_mask=attention_mask, 
+            output_attentions=output_attentions, 
+            output_hidden_states=output_hidden_states
+        )
 
-        out = self.process_outputs(teacher_output, student_output, **kwargs)
+        out = self.process_outputs(teacher_output, student_output,
+            labels=labels,
+            labels_mask=labels_mask, 
+            output_attentions=output_attentions, 
+            output_hidden_states=output_hidden_states)
 
         return out
                   
