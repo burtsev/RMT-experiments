@@ -177,6 +177,8 @@ class RecurrentWrapper(torch.nn.Module):
         else:
             out['loss'] = 0
 
+        out['ce_loss'] = out['loss']
+        
         out['logits'] = full_logits
         segment_keys = ['loss', 'logits']
         if kwargs.get('output_attentions'):

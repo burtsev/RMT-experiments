@@ -408,6 +408,8 @@ if __name__ == '__main__':
         data['labels'] = batch['labels']
         data['loss'] = output['loss']
         data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
+        if 'ce_loss' in output:
+            data['ce_loss'] = output['ce_loss']
         return data
 
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -423,6 +425,7 @@ if __name__ == '__main__':
     # - add support of HF metrics and turn off aggregation in case if metric has .add_batch method
     # scrolls_metric = datasets.load_metric(scrolls_metric_path, args.task_name, keep_in_memory=True)
 
+
     def metrics_fn(data):
         # compute metrics based on stored labels, predictions, ...
         metrics = {}
@@ -434,11 +437,14 @@ if __name__ == '__main__':
                 logger.info(f'y: {y[i]}')
                 logger.info(f'p: {p[i]}')
                 logger.info('-' * 50)
-        try:
-            perplexity = math.exp(data["loss"].mean())
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
+        if 'ce_loss' in data:
+            metrics['ce_loss'] = data['ce_loss'].mean()
+            try:
+                perplexity = math.exp(metrics['ce_loss'])
+            except OverflowError:
+                perplexity = float("inf")
+
+            metrics["perplexity"] = perplexity
 
         return metrics
 
