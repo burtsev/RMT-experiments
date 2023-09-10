@@ -626,8 +626,6 @@ class Trainer:
         if self.accelerator.is_main_process:
             if self.tb:
                 self.tb.flush()
-            elif self.args.report_to == 'wandb':
-                wandb.finish()
         logger.info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
