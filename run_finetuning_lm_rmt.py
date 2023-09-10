@@ -432,8 +432,8 @@ if __name__ == '__main__':
         y, p = data['labels'], data['predictions']
         if accelerator.is_main_process == 0 and args.show_valid_examples > 0:
             for i in range(min(args.show_valid_examples, len(y))):
-                logger.info(f'y: {tokenizer.decode(y[i])}')
-                logger.info(f'p: {tokenizer.decode(p[i])}')
+                logger.info(f'y: {tokenizer.decode(y[i][y[i] != -100])}')
+                logger.info(f'p: {tokenizer.decode(p[i][p[i] != -100])}')
                 logger.info(f'y: {y[i]}')
                 logger.info(f'p: {p[i]}')
                 logger.info('-' * 50)
