@@ -233,9 +233,9 @@ if __name__ == '__main__':
 
             if input_ids.shape[1] != block_size:
                 # take only labels for last block (maybe use all labels during training?)
-                labels_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-                for i, lens in enumerate(input_lens):
-                    labels_mask[i, max(lens - block_size, 0): lens] = True
+                labels_mask = torch.ones_like(input_ids, dtype=torch.bool)
+                # for i, lens in enumerate(input_lens):
+                    # labels_mask[i, max(lens - block_size, 0): lens] = True
                 collated['labels_mask'] = labels_mask
 
             return collated
@@ -410,6 +410,10 @@ if __name__ == '__main__':
         data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
         if 'ce_loss' in output:
             data['ce_loss'] = output['ce_loss']
+        
+        for i in range(args.max_n_segments):
+            if f'ce_loss_{i}' in output:
+                data[f'ce_loss_{i}'] = output[f'ce_loss_{i}']
         return data
 
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -445,6 +449,12 @@ if __name__ == '__main__':
                 perplexity = float("inf")
 
             metrics["perplexity"] = perplexity
+
+
+        for i in range(args.max_n_segments):
+            if f'ce_loss_{i}' in data:
+                metrics[f'ce_loss_{i}'] = data[f'ce_loss_{i}'].mean()
+        
 
         return metrics
 

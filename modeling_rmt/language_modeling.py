@@ -23,13 +23,13 @@ class MemoryCell(torch.nn.Module):
         memory = self.memory.repeat(input_shape[0], 1, 1)
         return memory
 
-    def forward(self, input_ids, memory_state=None, **kwargs):
+    def forward(self, input_ids, memory_state=None, labels=None, labels_mask=None, **kwargs):
         if memory_state is None:
             memory_state = self.set_memory(input_ids.shape)
 
         seg_kwargs = self.process_input(input_ids, memory_state, **kwargs)
         out = self.model(**seg_kwargs)
-        out, new_memory_state = self.process_output(out, **kwargs)
+        out, new_memory_state = self.process_output(out, labels, labels_mask, **kwargs)
 
         return out, new_memory_state
     
@@ -64,7 +64,7 @@ class MemoryCell(torch.nn.Module):
             mask[:, self.num_mem_tokens:-self.num_mem_tokens] = attention_mask
             return mask
     
-    def process_output(self, model_outputs, **kwargs):
+    def process_output(self, model_outputs, labels, labels_mask, **kwargs):
         if self.num_mem_tokens not in {0, None}:
             out = CausalLMOutputWithCrossAttentions()
             memory_state = model_outputs.hidden_states[-1][:, -self.num_mem_tokens:]
@@ -77,6 +77,21 @@ class MemoryCell(torch.nn.Module):
         else:
             memory_state = None
             out = model_outputs
+
+        if labels is not None:
+            ce_loss_fn = CrossEntropyLoss()
+            logits = out['logits'][..., :-1, :].contiguous()
+            flat_logits = logits.view(-1, logits.size(-1))
+            labels = labels[..., 1:].contiguous()
+            flat_labels = labels.view(-1)
+            if labels_mask is not None:
+                flat_mask = labels_mask[..., :-1].contiguous().view(-1)
+
+                logits = flat_logits[flat_mask]
+                labels = flat_labels[flat_mask]
+            ce_loss = ce_loss_fn(flat_logits, flat_labels)
+            out['ce_loss'] = ce_loss
+
             
         return out, memory_state 
 
@@ -96,10 +111,12 @@ class RecurrentWrapper(torch.nn.Module):
             segmented = [dict(
                 input_ids=input_ids[:, i] if not (input_ids is None) else None, 
                 inputs_embeds=inputs_embeds[:, i] if not (inputs_embeds is None) else None, 
-                attention_mask=attention_mask[:, i]
+                attention_mask=attention_mask[:, i],
+                labels=labels[:, i] if not (labels is None) else None, 
+                labels_mask=labels_mask[:, i] if not (labels_mask is None) else None, 
             ) for i in range(n_segs)]
         else:
-            segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+            segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, labels_mask=labels_mask)
         cell_outputs = []
         for seg_num, segment in enumerate(segmented):
             cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True)
