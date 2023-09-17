@@ -254,7 +254,7 @@ if __name__ == '__main__':
 
             if input_ids.shape[1] != block_size:
                 labels_mask = torch.ones_like(input_ids, dtype=bool)
-                labels_mask[:, :-block_size] = False
+                # labels_mask[:, :-block_size] = False
                 collated['labels_mask'] = labels_mask
 
             return collated
@@ -262,7 +262,7 @@ if __name__ == '__main__':
     with accelerator.main_process_first():
         train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
                                                         batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size), 
+        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, history_size), 
                                                              batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
