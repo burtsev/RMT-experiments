@@ -205,7 +205,7 @@ if __name__ == '__main__':
             }
         else:
             result = {
-                k: [t[max({0, i - history_size}) : i + block_size] for i in range(0, total_length, block_size)]
+                k: [t[max({0, i - history_size}) : i + block_size] for i in range(history_size, total_length, block_size)]
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
@@ -436,8 +436,11 @@ if __name__ == '__main__':
         y, p = data['labels'], data['predictions']
         if accelerator.is_main_process == 0 and args.show_valid_examples > 0:
             for i in range(min(args.show_valid_examples, len(y))):
-                logger.info(f'y: {tokenizer.decode(y[i][y[i] != -100])}')
-                logger.info(f'p: {tokenizer.decode(p[i][p[i] != -100])}')
+
+                y_ = np.array(y[i])
+                p_ = np.array(p[i])
+                logger.info(f'y: {tokenizer.decode(y_[y_ != -100])}')
+                logger.info(f'p: {tokenizer.decode(p_[p_ != -100])}')
                 logger.info(f'y: {y[i]}')
                 logger.info(f'p: {p[i]}')
                 logger.info('-' * 50)
