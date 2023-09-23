@@ -87,8 +87,8 @@ class MemoryCell(torch.nn.Module):
             if labels_mask is not None:
                 flat_mask = labels_mask[..., :-1].contiguous().view(-1)
 
-                logits = flat_logits[flat_mask]
-                labels = flat_labels[flat_mask]
+                flat_logits = flat_logits[flat_mask]
+                flat_labels = flat_labels[flat_mask]
             ce_loss = ce_loss_fn(flat_logits, flat_labels)
             out['ce_loss'] = ce_loss
 
@@ -105,7 +105,6 @@ class RecurrentWrapper(torch.nn.Module):
     def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
         memory_state = None
 
-        
         if input_segmented:
             n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
             segmented = [dict(
@@ -301,3 +300,4 @@ class Distillator(torch.nn.Module):
             out['loss'] = 0
 
         return out 
+
