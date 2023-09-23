@@ -420,6 +420,10 @@ if __name__ == '__main__':
             data['ce_loss'] = output['ce_loss']
         if 'dist' in output:
             data['dist'] = output['dist']
+        
+        for i in range(args.max_n_segments):
+            if f'ce_loss_{i}' in output:
+                data[f'ce_loss_{i}'] = output[f'ce_loss_{i}']
         return data
 
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -458,6 +462,11 @@ if __name__ == '__main__':
         
         if 'dist' in data:
             metrics['dist'] = data['dist'].mean()
+            
+        for i in range(args.max_n_segments):
+            if f'ce_loss_{i}' in data:
+                metrics[f'ce_loss_{i}'] = data[f'ce_loss_{i}'].mean()
+
 
         return metrics
 
