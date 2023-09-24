@@ -231,14 +231,17 @@ class Distillator(torch.nn.Module):
             p.requires_grad = False
     
     def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
-        teacher_output = self.teacher(
-            input_ids,
-            labels=labels, 
-            inputs_embeds=inputs_embeds, 
-            attention_mask=attention_mask, 
-            output_attentions=output_attentions, 
-            output_hidden_states=output_hidden_states
-        )
+        if self.training:
+            teacher_output = self.teacher(
+                input_ids,
+                labels=labels, 
+                inputs_embeds=inputs_embeds, 
+                attention_mask=attention_mask, 
+                output_attentions=output_attentions, 
+                output_hidden_states=output_hidden_states
+            )
+        else: 
+            teacher_output = dict()
         student_output = self.student(
             input_ids,
             labels=labels,
@@ -259,7 +262,7 @@ class Distillator(torch.nn.Module):
                   
     def process_outputs(self, teacher_output, student_output, **kwargs):
         out = CausalLMOutputWithCrossAttentions()
-        teacher_logits = teacher_output.logits
+        teacher_logits = teacher_output.logits if self.training else None
         student_logits = student_output.logits
 
         for (k, v) in student_output.items():
@@ -273,11 +276,11 @@ class Distillator(torch.nn.Module):
         if labels is not None:
             shift_labels = labels[..., 1:].contiguous()
             shift_logits = student_logits[..., :-1, :].contiguous()
-            shift_t_logits = teacher_logits[..., :-1, :].contiguous()
+            shift_t_logits = teacher_logits[..., :-1, :].contiguous() if self.training else None
 
             flat_labels = shift_labels.view(-1)
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_t_logits = shift_t_logits.view(-1, shift_t_logits.size(-1))
+            flat_t_logits = shift_t_logits.view(-1, shift_t_logits.size(-1)) if self.training else None
             
             labels_mask = kwargs.get('labels_mask')
             if labels_mask is not None:
@@ -285,19 +288,19 @@ class Distillator(torch.nn.Module):
 
                 flat_labels = flat_labels[shift_mask.view(-1)]
                 flat_logits = flat_logits[shift_mask.view(-1)]
-                flat_t_logits = flat_t_logits[shift_mask.view(-1)]
+                flat_t_logits = flat_t_logits[shift_mask.view(-1)] if self.training else None
 
             dist_fct = torch.nn.KLDivLoss(reduction='batchmean', log_target=True)
 
             log_sftmx_student = torch.log_softmax(flat_logits, dim=-1)  
-            log_sftmx_teacher = torch.log_softmax(flat_t_logits, dim=-1) 
-            dist = dist_fct(log_sftmx_student, log_sftmx_teacher)
-            out['dist'] = dist
+            log_sftmx_teacher = torch.log_softmax(flat_t_logits, dim=-1) if self.training else None
+            dist = dist_fct(log_sftmx_student, log_sftmx_teacher) if self.training else None
             out['ce_loss'] = out['loss']
-            out['loss'] = (1 - self.alpha) * out['ce_loss'] + self.alpha * dist
+            if self.training:
+                out['dist'] = dist
+                out['loss'] = (1 - self.alpha) * out['ce_loss'] + self.alpha * dist
             
         else:
             out['loss'] = 0
 
         return out 
-
