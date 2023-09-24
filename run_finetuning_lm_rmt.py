@@ -4,7 +4,7 @@ import os
 import math
 from pathlib import Path
 from itertools import chain
-
+import wandb
 # from dotenv import load_dotenv
 import torch
 import numpy as np
@@ -55,6 +55,7 @@ parser.add_argument('--seed', type=int, default=42, help='random seed')
 parser.add_argument('--show_valid_examples', type=int, default=0,
                     help='how many valid examples to show during training (default: 0)')
 parser.add_argument('--input_seq_len', type=int, default=128, help='input sequnce length (default: 128).')
+parser.add_argument('--val_seq_len', type=int, default=128, help='input sequnce length for validation (default: 128).')
 parser.add_argument('--target_seq_len', type=int, default=16, help='target sequnce length, should be set to '
                                                                    'max(len(target))+1 for EOS (default: 16).')
 parser.add_argument('--data_n_workers', type=int, default=2, help='number of dataloader workers (default: 2)')
@@ -80,6 +81,7 @@ parser.add_argument('--model_type', type=str, default='encoder-decoder',
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
+parser.add_argument('--max_val_segments', type=int, default=1, help='maximal segment number on validation')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='Randomly choose segment number from 1 to max_n_segments')
 parser.add_argument('--sum_loss', action='store_true', default=False,
                     help='with this flag task loss from all segments is summed')
@@ -194,6 +196,11 @@ if __name__ == '__main__':
         block_size -= 2 * args.num_mem_tokens
     history_size = args.input_seq_len - block_size
 
+    if args.val_seq_len is not None:
+        val_history_size = args.val_seq_len - block_size
+    else:
+        val_history_size = history_size
+
     def group_texts(examples, block_size, history_size=None):
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
@@ -262,7 +269,7 @@ if __name__ == '__main__':
     with accelerator.main_process_first():
         train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
                                                         batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, history_size), 
+        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, val_history_size), 
                                                              batched=True, desc=f"Grouping valid in chunks of {block_size}")
 
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
@@ -484,7 +491,17 @@ if __name__ == '__main__':
             trainer.load(best_model_path)
         if valid_dataloader is not None:
             logger.info('Runnning validation on valid data:')
-            trainer.validate(valid_dataloader, write_tb=False, split='valid')
+            metrics = trainer.validate(valid_dataloader, write_tb=False, split='valid')
+            evaluated_on = []
+            metric_on = []
+            for i in range(args.max_val_segments):
+                if f'ce_loss_{i}' in metrics:
+                    evaluated_on.append(i)
+                    metric_on.append(metrics[f'ce_loss_{i}'])
+            if args.report_to == 'wandb' and accelerator.is_main_process:
+                table = wandb.Table(data=np.vstack([evaluated_on, metric_on]).T, columns=['evaluated_on', 'valid/ce_loss'])
+                line = trainer.run.plot_table("wandb/line/v0", table, {"x":'evaluated_on', "y":'valid/ce_loss'})
+                trainer.run.log({'per_segment_eval': line})
         if test_dataloader is not None:
             logger.info('Runnning validation on test data:')
             trainer.validate(test_dataloader, write_tb=True, split='test')
