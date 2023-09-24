@@ -223,7 +223,7 @@ class Trainer:
             if args.report_to == 'tb':
                 self.tb = SummaryWriter(log_dir=self.args.model_path)
             elif args.report_to == 'wandb':
-                wandb.init()
+                self.run = wandb.init()
 
         # move model to gpu
         self.model.to(self.device)
@@ -558,7 +558,7 @@ class Trainer:
                             self.tb.add_scalar(f'{k}/samples/train', train_metrics[k],
                                                self.n_iter * self.global_batch_size)
                         elif self.args.report_to == 'wandb':
-                            wandb.log({f'train/{k}': train_metrics[k]}, step=self.n_iter)
+                            self.run.log({f'train/{k}': train_metrics[k]}, step=self.n_iter)
                     # log iteration time
                     if self.tb:
                         self.tb.add_scalar('time/iterations/per_iter', iteration_time, self.n_iter)
@@ -575,14 +575,14 @@ class Trainer:
                                     self.tb.add_scalar(f'{p}/samples/param_group_{j}', param_group[p],
                                                    self.n_iter * self.global_batch_size)
                                 elif self.args.report_to == 'wandb':
-                                    wandb.log({f'param_group_{j}/{p}': param_group[p]}, step=self.n_iter)
+                                    self.run.log({f'param_group_{j}/{p}': param_group[p]}, step=self.n_iter)
                     # log gradients global norm
                     gnorm = np.mean(global_grad_norms) if len(global_grad_norms) > 0 else 0
                     if self.tb:
                         self.tb.add_scalar('gradients_global_norm/iterations', gnorm, self.n_iter)
                         self.tb.add_scalar('gradients_global_norm/samples', gnorm, self.n_iter * self.global_batch_size)
                     elif self.args.report_to == 'wandb':
-                        wandb.log({'gradient_global_norm': gnorm}, step=self.n_iter)
+                        self.run.log({'gradient_global_norm': gnorm}, step=self.n_iter)
 
             # validation
             if self.valid_dataloader is not None and self.n_iter % self.args.valid_interval == 0:
@@ -658,7 +658,7 @@ class Trainer:
                     self.tb.add_scalar(f'{k}/iterations/{split}', metrics[k], self.n_iter)
                     self.tb.add_scalar(f'{k}/samples/{split}', metrics[k], self.n_iter * self.global_batch_size)
                 elif self.args.report_to == 'wandb':
-                    wandb.log({f'{split}/{k}': metrics[k]}, step=self.n_iter)
+                    self.run.log({f'{split}/{k}': metrics[k]}, step=self.n_iter)
             if self.tb and write_tb:
                 self.tb.flush()
 
