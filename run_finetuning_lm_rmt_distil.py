@@ -6,6 +6,7 @@ from pathlib import Path
 from itertools import chain
 import wandb
 # from dotenv import load_dotenv
+import random
 import torch
 import numpy as np
 import datasets
@@ -83,7 +84,9 @@ parser.add_argument('--alpha_distil', type=float, default=None, help='')
 
 # Aydar # RMT args
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
+parser.add_argument('--block_size', type=int, default=None, help='number of real tokens in block')
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
+parser.add_argument('--d_mem', type=int, default=None, help='number of rows in associative matrix')
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--max_val_segments', type=int, default=1, help='maximal segment number on validation')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='Randomly choose segment number from 1 to max_n_segments')
@@ -195,9 +198,7 @@ if __name__ == '__main__':
         else:
             raise ValueError(f"Unknown dataset {args.task_name}")
 
-    block_size = args.input_size
-    if args.num_mem_tokens is not None:
-        block_size -= 2 * args.num_mem_tokens
+    block_size = args.block_size
     history_size = args.input_seq_len - block_size
 
     if args.val_seq_len is not None:
@@ -250,6 +251,12 @@ if __name__ == '__main__':
                     # labels_mask[i, max(lens - block_size, 0): lens] = True
                 collated['labels_mask'] = labels_mask
 
+            if getattr(args, 'vary_n_segments', False):
+                n_segments = random.randint(0, args.max_n_segments)
+                n_tokens = n_segments * block_size
+                for k in collated:
+                    collated[k] = collated[k][:, -n_tokens:]
+
             return collated
     else:
         def collate_fn(batch):
@@ -268,6 +275,12 @@ if __name__ == '__main__':
                 labels_mask = torch.ones_like(input_ids, dtype=bool)
                 # labels_mask[:, :-block_size] = False
                 collated['labels_mask'] = labels_mask
+                
+            if getattr(args, 'vary_n_segments', False):
+                n_segments = random.randint(0, args.max_n_segments)
+                n_tokens = n_segments * block_size
+                for k in collated:
+                    collated[k] = collated[k][:, -n_tokens:]
 
             return collated
 
@@ -357,7 +370,7 @@ if __name__ == '__main__':
 
     ## load cpt of backbone model
     if args.backbone_cpt:
-        backbone_cpt = os.path.join(args.backbone_cpt, "model_best.pth")
+        backbone_cpt = os.path.join(args.backbone_cpt, "model_best")
         cpt = torch.load(backbone_cpt, map_location='cpu')
         model.load_state_dict(cpt['model_state_dict'], strict=False)
         logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
@@ -371,7 +384,14 @@ if __name__ == '__main__':
         logger.info(f'Wrapping in: {memory_cell_cls} and {recurrent_wrapper_cls}')
         
         
-        cell = memory_cell_cls(model, args.num_mem_tokens)
+        mem_cell_args = dict(
+            base_model=model,
+            num_mem_tokens=args.num_mem_tokens,
+        )
+        if args.d_mem is not None:
+            mem_cell_args['d_mem'] = args.d_mem
+
+        cell = memory_cell_cls(**mem_cell_args)
         model = recurrent_wrapper_cls(cell, 
                                       segment_size=block_size,
                                       max_n_segments=args.max_n_segments, 
@@ -383,10 +403,10 @@ if __name__ == '__main__':
         model = distillator(teacher, model, alpha_distil=args.alpha_distil)             
 
         ## load cpt of rmt
-        if args.model_cpt:
-            model_cpt = os.path.join(args.model_cpt, "model_best.pth")
+        if args.model_cpt and args.model_cpt != 'None':
+            model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
             cpt = torch.load(model_cpt, map_location='cpu')
-            model.load_state_dict(cpt['model_state_dict'], strict=False)
+            model.load_state_dict(cpt, strict=False)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
     if args.freeze_model_weights:
@@ -414,8 +434,8 @@ if __name__ == '__main__':
 
     # todo: group optimizer params
     optimizer = optimizer_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)    
-    if args.model_cpt or args.backbone_cpt:
-        optimizer.load_state_dict(cpt['optimizer_state_dict'])
+    # if args.model_cpt or args.backbone_cpt:
+        # optimizer.load_state_dict(cpt['optimizer_state_dict'])
 
     # for encoder only classification
     def keep_for_metrics_fn(batch, output):
