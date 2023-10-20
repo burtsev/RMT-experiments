@@ -219,11 +219,11 @@ class Trainer:
         self.tb = None
         # write tensorboard logs only from rank 0 and if model_path is specified
         
-        if self.accelerator.is_main_process and self.args.model_path is not None:
-            if args.report_to == 'tb':
-                self.tb = SummaryWriter(log_dir=self.args.model_path)
-            elif args.report_to == 'wandb':
-                self.run = wandb.init()
+        if self.accelerator.is_main_process and self.args.model_path is not None and args.report_to == 'tb':
+            self.tb = SummaryWriter(log_dir=self.args.model_path)
+
+        if self.accelerator.is_main_process and args.report_to == 'wandb':
+            self.run = wandb.init()
 
         # move model to gpu
         self.model.to(self.device)
