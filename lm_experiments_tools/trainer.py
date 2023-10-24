@@ -223,7 +223,7 @@ class Trainer:
             self.tb = SummaryWriter(log_dir=self.args.model_path)
 
         if self.accelerator.is_main_process and args.report_to == 'wandb':
-            self.run = wandb.init()
+            self.run = wandb.init(name=f'{args.num_mem_tokens}mem_{args.max_n_segments}seg')
 
         # move model to gpu
         self.model.to(self.device)
