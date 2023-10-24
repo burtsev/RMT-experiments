@@ -169,7 +169,7 @@ if __name__ == '__main__':
 
     prepare_run(args, logger, logger_fmt)
 
-    if not args.from_pretrained:
+    if args.tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
@@ -259,7 +259,7 @@ if __name__ == '__main__':
 
             return collated
     else:
-        def collate_fn(batch):
+        def collate_fn(batch, valid=False):
             input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
             labels = [torch.tensor(b['labels'][::-1]) for b in batch]
             attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
@@ -275,12 +275,12 @@ if __name__ == '__main__':
                 labels_mask = torch.ones_like(input_ids, dtype=bool)
                 # labels_mask[:, :-block_size] = False
                 collated['labels_mask'] = labels_mask
-                
-            if getattr(args, 'vary_n_segments', False):
-                n_segments = random.randint(0, args.max_n_segments)
-                n_tokens = n_segments * block_size
-                for k in collated:
-                    collated[k] = collated[k][:, -n_tokens:]
+        
+            # if getattr(args, 'vary_n_segments', False) and not valid:
+            #     n_segments = random.randint(1, args.max_n_segments)
+            #     n_tokens = n_segments * block_size
+            #     for k in collated:
+            #         collated[k] = collated[k][:, -n_tokens:]
 
             return collated
 
@@ -312,14 +312,14 @@ if __name__ == '__main__':
     valid_dataloader = None
     logger.info('preparing validation data from babilong')
     valid_dataloader = alignedDataLoader(valid_dataset, batch_size=per_worker_batch_size,
-                                         collate_fn=collate_fn, shuffle=False, drop_last=True, **kwargs)
+                                         collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
     # get test dataset
     if 'test' in tokenized_datasets.keys():
-        test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, block_size),
+        test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, block_size, val_history_size),
                                                       batched=True, desc=f"Grouping test in chunks of {block_size}")
         test_dataloader = alignedDataLoader(test_dataset, batch_size=per_worker_batch_size,
-                                            collate_fn=collate_fn, shuffle=False, drop_last=True, **kwargs)
+                                            collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
@@ -536,7 +536,17 @@ if __name__ == '__main__':
                 trainer.run.log({'per_segment_eval': line})
         if test_dataloader is not None:
             logger.info('Runnning validation on test data:')
-            trainer.validate(test_dataloader, write_tb=True, split='test')
+            metrics = trainer.validate(test_dataloader, write_tb=False, split='test')
+            evaluated_on = []
+            metric_on = []
+            for i in range(args.max_val_segments):
+                if f'ce_loss_{i}' in metrics:
+                    evaluated_on.append(i)
+                    metric_on.append(metrics[f'ce_loss_{i}'])
+            if args.report_to == 'wandb' and accelerator.is_main_process:
+                table = wandb.Table(data=np.vstack([evaluated_on, metric_on]).T, columns=['evaluated_on', 'test/ce_loss'])
+                line = trainer.run.plot_table("wandb/line/v0", table, {"x":'evaluated_on', "y":'test/ce_loss'})
+                trainer.run.log({'per_segment_test': line})
         trainer.save_metrics(save_path=args.model_path)
     else:
         # run validation, do not write to tensorboard
