@@ -394,7 +394,7 @@ class GPTNeoXMLP(nn.Module):
 
     def forward(self, hidden_states):
         hidden_states = self.dense_h_to_4h(hidden_states)
-        hidden_states = self.act(hidden_states)
+        # hidden_states = self.act(hidden_states)
         hidden_states = self.dense_4h_to_h(hidden_states)
         return hidden_states
 
