@@ -276,11 +276,11 @@ if __name__ == '__main__':
                 # labels_mask[:, :-block_size] = False
                 collated['labels_mask'] = labels_mask
         
-            # if getattr(args, 'vary_n_segments', False) and not valid:
-            #     n_segments = random.randint(1, args.max_n_segments)
-            #     n_tokens = n_segments * block_size
-            #     for k in collated:
-            #         collated[k] = collated[k][:, -n_tokens:]
+            if getattr(args, 'vary_n_segments', False) and not valid:
+                n_segments = random.randint(1, args.max_n_segments)
+                n_tokens = n_segments * block_size
+                for k in collated:
+                    collated[k] = collated[k][:, -n_tokens:]
 
             return collated
 
