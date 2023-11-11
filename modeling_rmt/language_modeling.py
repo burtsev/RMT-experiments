@@ -307,18 +307,19 @@ class Distillator(torch.nn.Module):
 
 
 class AssociativeLayerWrapper(torch.nn.Module):
-    def __init__(self, layer, d_model, num_mem_tokens) -> None:
+    def __init__(self, layer, d_model, num_mem_tokens, d_mem) -> None:
         super().__init__()
         # self.seg_num = 0
         self.d_model = d_model
         self.num_mem_tokens = num_mem_tokens
+        self.d_mem = d_mem
 
-        self.W_mq = torch.nn.Linear(d_model, d_model, bias=False)
+        self.W_mq = torch.nn.Linear(d_model, d_mem, bias=False)
         torch.nn.init.zeros_(self.W_mq.weight)
-        self.W_mk = torch.nn.Linear(d_model, d_model, bias=False)
+        self.W_mk = torch.nn.Linear(d_model, d_mem, bias=False)
         self.W_mv = torch.nn.Linear(d_model, d_model, bias=False)
 
-        self.W_mem = torch.zeros(1, d_model, d_model)
+        self.W_mem = torch.zeros(1, d_mem, d_model)
         self.W_mem.requires_grad_(False)
 
         # self.ln = torch.nn.LayerNorm(d_model)
@@ -329,7 +330,7 @@ class AssociativeLayerWrapper(torch.nn.Module):
     def forward(self, hidden_states, **kwargs):
         
     
-        mq = self.W_mq(hidden_states) # (bsz, seq_len, d_model)
+        mq = self.W_mq(hidden_states) # (bsz, seq_len, d_mem)
         self.W_mem = self.W_mem.to(hidden_states.device)
         hidden_states = mq @ self.W_mem + hidden_states
         
@@ -344,22 +345,23 @@ class AssociativeLayerWrapper(torch.nn.Module):
         mk = self.W_mk(mem_tokens)
         mv = self.W_mv(mem_tokens) # (bsz, num_mem_tokens, d_model)
 
-        associations =  torch.einsum('ijk,ijt->ikt', mk, mv) # (bsz, num_mem_tokens, d_model, d_model)
+        associations =  torch.einsum('ijk,ijt->ikt', mk, mv) # (bsz, num_mem_tokens, d_mem, d_model)
         self.W_mem = self.W_mem + associations
         self.W_mem = self.W_mem / self.W_mem.std(dim=(1, 2))[:, None, None]
 
 
     def zero_mem(self):
         # self.seg_num = 0
-        self.W_mem = torch.zeros(1, self.d_model, self.d_model)
+        self.W_mem = torch.zeros(1, self.d_mem, self.d_model)
 
 
 
 class AssociativeMemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens, layers_attr: str = 'transformer.h'):
+    def __init__(self, base_model, num_mem_tokens, d_mem, layers_attr: str = 'transformer.h'):
         super().__init__()
         self.model = base_model
         self.num_mem_tokens = num_mem_tokens
+        self.d_mem = d_mem
         self.d_model = base_model.get_input_embeddings().embedding_dim
         self.W_mq = torch.nn.ModuleList()
         self.W_mem = []
@@ -370,7 +372,7 @@ class AssociativeMemoryCell(torch.nn.Module):
             self.layers = getattr(self.layers, attr)
         
         for i in range(len(self.layers)):
-            self.layers[i] = AssociativeLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens)
+            self.layers[i] = AssociativeLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens, self.d_mem)
         self.create_memory(num_mem_tokens)
 
     def create_memory(self, num_mem_tokens):
