@@ -25,8 +25,6 @@ class AssociativeLayerWrapper(torch.nn.Module):
         self.layer = layer
 
     def forward(self, hidden_states, **kwargs):
-        
-    
         mq = self.W_mq(hidden_states) # (bsz, seq_len, d_mem)
         self.W_mem = self.W_mem.to(hidden_states.device)
         hidden_states = mq @ self.W_mem + hidden_states
@@ -44,6 +42,7 @@ class AssociativeLayerWrapper(torch.nn.Module):
 
         associations =  torch.einsum('ijk,ijt->ikt', mk, mv) # (bsz, num_mem_tokens, d_mem, d_model)
         self.W_mem = self.W_mem + associations
+        # self.W_mem = self.W_mem / torch.linalg.norm(self.W_mem)
         self.W_mem = self.W_mem / self.W_mem.std(dim=(1, 2))[:, None, None]
 
 
