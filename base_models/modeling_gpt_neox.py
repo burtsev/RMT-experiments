@@ -275,8 +275,8 @@ class GPTNeoXAttention(nn.Module):
             # Apply the attention mask
             attn_scores = attn_scores + attention_mask
 
-        # attn_weights = nn.functional.softmax(attn_scores, dim=-1)
-        attn_weights = nn.functional.relu(attn_scores)
+        attn_weights = nn.functional.softmax(attn_scores, dim=-1)
+        # attn_weights = nn.functional.relu(attn_scores)
         attn_weights = attn_weights.to(value.dtype)
 
         # Mask heads if we want to
