@@ -409,9 +409,14 @@ if __name__ == '__main__':
             model.load_state_dict(cpt, strict=False)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
+
+    def to_freeze(name):
+        if 'memory_cell'in name:
+            name = ''.join(name.split('memory_cell'))
+        return 'memory' not in name and 'lora' not in name and 'adapter' not in name and 'W_m' not in name
     if args.freeze_model_weights:
         for n, p in model.named_parameters():
-            if 'memory' not in n and 'lora' not in n and 'adapter' not in n:
+            if to_freeze(n):
                 p.requires_grad = False
             else:
                 p.requires_grad = True
