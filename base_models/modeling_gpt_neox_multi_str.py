@@ -696,7 +696,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             if i == 0:
                 hidden_states_1st_layer = hidden_states
                 hidden_states_intermediate = hidden_states
-            if (i > 0) and (i < (len(self.layers)-2)):
+            if (i > 0) and (i < (len(self.layers)-1)):
                 hidden_states_intermediate = hidden_states_intermediate + hidden_states
                 hidden_states = hidden_states_1st_layer
             if i == (len(self.layers)-2):
