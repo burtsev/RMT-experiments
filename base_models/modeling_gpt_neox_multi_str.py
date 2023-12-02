@@ -700,7 +700,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 hidden_states_intermediate = hidden_states_intermediate + hidden_states
                 hidden_states = hidden_states_1st_layer
             if i == (len(self.layers)-2):
-                hidden_states = hidden_states_intermediate
+                hidden_states = hidden_states_1st_layer + hidden_states_intermediate
 
         hidden_states = self.final_layer_norm(hidden_states)
         # Add last hidden state
