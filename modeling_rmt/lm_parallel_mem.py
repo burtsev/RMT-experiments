@@ -49,6 +49,7 @@ class MemoryCell(torch.nn.Module):
         for i in range(len(self.layers)):
             self.layers[i] = ParallelLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens)
         self.create_memory(num_mem_tokens)
+        self.wrap_positional_embeddings(num_mem_tokens)
 
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
@@ -56,6 +57,14 @@ class MemoryCell(torch.nn.Module):
         memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
         memory_weights = torch.randn((num_mem_tokens, memory_dim)) * embeddings.weight.data.std()
         self.register_parameter('memory', torch.nn.Parameter(memory_weights, requires_grad=True))
+
+    def wrap_positional_embeddings(self, num_mem_tokens):
+
+        num_pos_embs, emb_dim = self.model.transformer.wpe.weight.shape
+        prev_embs = self.model.transformer.wpe.weight.detach()
+        self.model.transformer.wpe = torch.nn.Embedding(2 * num_mem_tokens + num_pos_embs, emb_dim)
+        with torch.no_grad():
+            self.model.transformer.wpe.weight[num_mem_tokens:-num_mem_tokens] = prev_embs
 
 
     def set_memory(self, input_shape):
@@ -77,7 +86,7 @@ class MemoryCell(torch.nn.Module):
 
     def process_input(self, input_ids, memory_state, **kwargs):
         seg_kwargs = dict(**kwargs)
-
+        num_pos_embs = self.model.transformer.wpe.weight.shape[0]
         inputs_embeds = kwargs.get('inputs_embeds')
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -88,6 +97,12 @@ class MemoryCell(torch.nn.Module):
         if kwargs.get('attention_mask') is not None:
             seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape)
         seg_kwargs['output_hidden_states'] = True
+        read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
+        write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
+        seg_kwargs['position_ids'] = torch.cat([
+            read_ordinary_pos, 
+            write_pos
+        ]).long().unsqueeze(0)
         return seg_kwargs
     
     def pad_attention_mask(self, attention_mask, shape):
