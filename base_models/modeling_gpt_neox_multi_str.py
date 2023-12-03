@@ -693,14 +693,16 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
             # multi-stream for all intermediate layers
-            if i == 0:
+            stream_start = 1 # start after layer stream_start
+            stream_size = 2
+            if i == stream_start:
                 hidden_states_1st_layer = hidden_states
                 hidden_states_intermediate = hidden_states
-            if (i > 0) and (i < (len(self.layers)-1)):
+            if (i > stream_start) and (i <= (stream_start + stream_size)):
                 hidden_states_intermediate = hidden_states_intermediate + hidden_states
                 hidden_states = hidden_states_1st_layer
-            if i == (len(self.layers)-2):
-                hidden_states = hidden_states_1st_layer + hidden_states_intermediate
+            if i == (stream_start + stream_size):
+                hidden_states = hidden_states_intermediate
 
         hidden_states = self.final_layer_norm(hidden_states)
         # Add last hidden state
