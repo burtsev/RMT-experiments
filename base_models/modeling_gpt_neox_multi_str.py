@@ -642,8 +642,6 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             inputs_embeds = self.embed_in(input_ids)
 
         hidden_states = self.emb_dropout(inputs_embeds)
-        hidden_states_1st_layer = hidden_states
-        hidden_states_intermediate = hidden_states
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -655,6 +653,13 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         presents = () if use_cache else None
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
+
+        # multi-stream for all intermediate layers
+        stream_start = 0 # start after layer stream_start
+        stream_size = 2 # number of parallel streams
+        stream_depth = 2 # depth of each parallel stream
+        hidden_states_root_layer = hidden_states
+        hidden_states_end_stream = hidden_states
 
         for i, (layer, layer_past) in enumerate(zip(self.layers, past_key_values)):
             if output_hidden_states:
@@ -692,17 +697,22 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             if output_attentions:
                 all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
-            # multi-stream for all intermediate layers
-            stream_start = 1 # start after layer stream_start
-            stream_size = 2
+            # the first layer of multi-stream part
             if i == stream_start:
-                hidden_states_1st_layer = hidden_states
-                hidden_states_intermediate = hidden_states
-            if (i > stream_start) and (i <= (stream_start + stream_size)):
-                hidden_states_intermediate = hidden_states_intermediate + hidden_states
-                hidden_states = hidden_states_1st_layer
-            if i == (stream_start + stream_size):
-                hidden_states = hidden_states_intermediate
+                hidden_states_root_layer = hidden_states
+                hidden_states_end_stream = hidden_states
+
+            if (i > stream_start) and (i <= (stream_start + stream_size * stream_depth)):
+                # the last layer of a stream 
+                if (i - stream_start) % stream_depth == 0:
+                    # add output of the stream to all previous streams
+                    hidden_states_end_stream = hidden_states_end_stream + hidden_states
+                    # reset input for the next stream to the outputs of the root layer 
+                    hidden_states = hidden_states_root_layer
+
+            # the last layer of multi-stream part
+            if i == (stream_start + stream_size * stream_depth): 
+                hidden_states = hidden_states_end_stream
 
         hidden_states = self.final_layer_norm(hidden_states)
         # Add last hidden state
