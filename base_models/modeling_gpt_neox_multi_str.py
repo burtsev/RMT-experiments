@@ -700,13 +700,16 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             # the first layer of multi-stream part
             if i == stream_start:
                 hidden_states_root_layer = hidden_states
-                hidden_states_end_stream = hidden_states
+                # hidden_states_end_stream = hidden_states
 
             if (i > stream_start) and (i <= (stream_start + stream_size * stream_depth)):
                 # the last layer of a stream 
                 if (i - stream_start) % stream_depth == 0:
                     # add output of the stream to all previous streams
                     hidden_states_end_stream = hidden_states_end_stream + hidden_states
+                    # no direct skip connection from  root to end in multi-stream
+                    if i == (stream_start + stream_depth): 
+                        hidden_states_end_stream = hidden_states
                     # reset input for the next stream to the outputs of the root layer 
                     hidden_states = hidden_states_root_layer
 
