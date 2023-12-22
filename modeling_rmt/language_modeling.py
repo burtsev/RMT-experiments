@@ -23,11 +23,16 @@ class MemoryCell(torch.nn.Module):
     def wrap_positional_embeddings(self, num_mem_tokens):
 
         num_pos_embs, emb_dim = self.model.transformer.wpe.weight.shape
+
+        new_num_pos = num_pos_embs + 2 * num_mem_tokens
         prev_embs = self.model.transformer.wpe.weight.detach()
-        self.model.transformer.wpe = torch.nn.Embedding(2 * num_mem_tokens + num_pos_embs, emb_dim)
+        self.model.transformer.wpe = torch.nn.Embedding(new_num_pos, emb_dim)
         with torch.no_grad():
             self.model.transformer.wpe.weight[num_mem_tokens:-num_mem_tokens] = prev_embs
-
+        for layer in self.model.transformer.h:
+            layer.attn.bias = torch.tril(torch.ones((new_num_pos, new_num_pos), dtype=torch.uint8)).view(
+                1, 1, new_num_pos, new_num_pos
+            )
 
     def set_memory(self, input_shape):
         memory = self.memory.repeat(input_shape[0], 1, 1)
@@ -109,8 +114,8 @@ class MemoryCell(torch.nn.Module):
                 flat_labels = flat_labels[flat_mask]
             ce_loss = ce_loss_fn(flat_logits, flat_labels)
             out['ce_loss'] = ce_loss
-
-            
+        if kwargs.get('use_cache') is not None:
+            out['past_key_values'] = model_outputs.past_key_values
         return out, memory_state 
 
 
@@ -120,11 +125,22 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
+    def forward(self, 
+                input_ids, 
+                labels=None, 
+                labels_mask=None, 
+                inputs_embeds=None, 
+                attention_mask=None, 
+                output_attentions=None, 
+                output_hidden_states=None,
+                input_segmented=False,
+                sliding_window=False,
+                ):
         memory_state = None
 
         if input_segmented:
             n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
+
             segmented = [dict(
                 input_ids=input_ids[:, i] if not (input_ids is None) else None, 
                 inputs_embeds=inputs_embeds[:, i] if not (inputs_embeds is None) else None, 
@@ -132,11 +148,30 @@ class RecurrentWrapper(torch.nn.Module):
                 labels=labels[:, i] if not (labels is None) else None, 
                 labels_mask=labels_mask[:, i] if not (labels_mask is None) else None, 
             ) for i in range(n_segs)]
+            labels = torch.cat([labels[:, i] for i in range(n_segs)], dim=1)
+            if labels_mask is not None:
+                labels_mask = torch.cat([labels_mask[:, i] for i in range(n_segs)], dim=1)
         else:
             segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, labels_mask=labels_mask)
         cell_outputs = []
+        past_key_values = None
+        num_mem_tokens = self.memory_cell.num_mem_tokens
         for seg_num, segment in enumerate(segmented):
-            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True)
+            seg_len = segment['input_ids'].size(-2)
+            cell_out, memory_state = self.memory_cell(**segment, 
+                                                      memory_state=memory_state, 
+                                                      output_hidden_states=True, 
+                                                      use_cache=sliding_window, 
+                                                      past_key_values=past_key_values
+                                                    )
+            if sliding_window:
+                past_key_values = [
+                    [
+                        k_or_v[..., -(num_mem_tokens+seg_len):-num_mem_tokens, :] 
+                        for k_or_v in seg_kv
+                    ] 
+                    for seg_kv in cell_out['past_key_values']
+                ]
             cell_outputs.append(cell_out)
             self.manage_gradients(memory_state, seg_num)
 
@@ -248,28 +283,47 @@ class Distillator(torch.nn.Module):
         for p in self.teacher.parameters():
             p.requires_grad = False
     
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
-        if self.training:
-            teacher_output = self.teacher(
-                input_ids,
-                labels=labels, 
-                inputs_embeds=inputs_embeds, 
-                attention_mask=attention_mask, 
-                output_attentions=output_attentions, 
-                output_hidden_states=output_hidden_states
-            )
-        else: 
-            teacher_output = dict()
+    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
+        with torch.no_grad():
+            if self.training:
+                if input_segmented:
+                    n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
+                    teacher_output = self.teacher(
+                        input_ids=torch.cat([input_ids[:, i] for i in range(n_segs)], dim=1) if input_ids is not None else None,
+                        labels=torch.cat([labels[:, i] for i in range(n_segs)], dim=1)  if labels is not None else None, 
+                        inputs_embeds=torch.cat([inputs_embeds[:, i] for i in range(n_segs)], dim=1) if inputs_embeds is not None else None, 
+                        attention_mask=torch.cat([attention_mask[:, i] for i in range(n_segs)], dim=1) if attention_mask is not None else None, 
+                        output_attentions=output_attentions, 
+                        output_hidden_states=output_hidden_states
+                    )
+                else:
+                    teacher_output = self.teacher(
+                        input_ids=input_ids,
+                        labels=labels, 
+                        inputs_embeds=inputs_embeds, 
+                        attention_mask=attention_mask, 
+                        output_attentions=output_attentions, 
+                        output_hidden_states=output_hidden_states
+                    )
+            else: 
+                teacher_output = dict()
         student_output = self.student(
-            input_ids,
+            input_ids=input_ids,
             labels=labels,
             labels_mask=labels_mask, 
             inputs_embeds=inputs_embeds, 
             attention_mask=attention_mask, 
             output_attentions=output_attentions, 
-            output_hidden_states=output_hidden_states
+            output_hidden_states=output_hidden_states,
+            input_segmented=input_segmented
         )
-
+        
+        if input_segmented:
+            n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
+            labels = torch.cat([labels[:, i] for i in range(n_segs)], dim=1)
+            if labels_mask is not None:
+                labels_mask = torch.cat([labels_mask[:, i] for i in range(n_segs)], dim=1)
+    
         out = self.process_outputs(teacher_output, student_output,
             labels=labels,
             labels_mask=labels_mask, 
