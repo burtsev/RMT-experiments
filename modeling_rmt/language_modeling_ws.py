@@ -60,9 +60,16 @@ class MemoryCell(torch.nn.Module):
         if self.num_mem_tokens in {0, None}:
             return attention_mask
         else:
+            # Create a new mask filled with ones (full attention)
             mask = torch.ones(*shape[:2], dtype=torch.int64).to(attention_mask.device)
-            mask[:, self.num_mem_tokens:-self.num_mem_tokens] = attention_mask
-            return mask
+
+            # Crop the last token from the original attention mask
+            cropped_attention_mask = attention_mask[:, :-1] if attention_mask.shape[1] > 0 else attention_mask
+
+            # Insert the cropped attention mask in the middle
+            mask[:, self.num_mem_tokens:self.num_mem_tokens + cropped_attention_mask.shape[1]] = cropped_attention_mask
+            
+        return mask
     
     def process_output(self, model_outputs, **kwargs):
         if self.num_mem_tokens not in {0, None}:
