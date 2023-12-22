@@ -67,7 +67,7 @@ class MemoryCell(torch.nn.Module):
             cropped_attention_mask = attention_mask[:, :-1] if attention_mask.shape[1] > 0 else attention_mask
 
             # Insert the cropped attention mask in the middle
-            mask[:, self.num_mem_tokens:self.num_mem_tokens + cropped_attention_mask.shape[1]] = cropped_attention_mask
+            mask[:, self.num_mem_tokens: -(self.num_mem_tokens + 1)] = cropped_attention_mask
             
         return mask
     
