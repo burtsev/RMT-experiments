@@ -2,33 +2,63 @@ import math
 import torch
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions, BaseModelOutputWithPastAndCrossAttentions
+from torch.nn.functional import relu as r
+
+def dpfp(x, nu=1):
+  x = torch.cat([r(x), r(-x)], dim=-1)
+  x_rolled = torch.cat([x.roll(shifts=j, dims=-1)
+           for j in range(1,nu+1)], dim=-1)
+  x_repeat = torch.cat([x] * nu, dim=-1)
+  return x_repeat * x_rolled
+
+class DPFP:
+    def __init__(self, nu):
+        self.nu = nu
+    
+    def __call__(self, x):
+        nu = self.nu
+        x = torch.cat([r(x), r(-x)], dim=-1)
+        x_rolled = torch.cat([x.roll(shifts=j, dims=-1) for j in range(1,nu+1)], dim=-1)
+        x_repeat = torch.cat([x] * nu, dim=-1)
+        return x_repeat * x_rolled
 
 class AssociativeLayerWrapper(torch.nn.Module):
+
     def __init__(self, layer, d_model, num_mem_tokens, d_mem) -> None:
         super().__init__()
         # self.seg_num = 0
         self.d_model = d_model
         self.num_mem_tokens = num_mem_tokens
         self.d_mem = d_mem
-
+        nu = 3
+        self.nu = nu
         self.W_mq = torch.nn.Linear(d_model, d_mem, bias=False)
-        torch.nn.init.zeros_(self.W_mq.weight)
+        # torch.nn.init.zeros_(self.W_mq.weight)
         self.W_mk = torch.nn.Linear(d_model, d_mem, bias=False)
         self.W_mv = torch.nn.Linear(d_model, d_model, bias=False)
+        torch.nn.init.zeros_(self.W_mv.weight)
+        self.W_mb = torch.nn.Linear(d_model, 1)
 
-        self.W_mem = torch.zeros(1, d_mem, d_model)
+        self.W_mem = torch.zeros(1, 2 * d_mem * nu, d_model)
+        self.z = torch.ones(1, 2 * d_mem * nu)
         self.W_mem.requires_grad_(False)
+        self.z.requires_grad_(False)
+        
+        self.phi = DPFP(nu)
 
-        # self.ln = torch.nn.LayerNorm(d_model)
+
         self.zero_mem()
     
         self.layer = layer
 
     def forward(self, hidden_states, **kwargs):
-        mq = self.W_mq(hidden_states) # (bsz, seq_len, d_mem)
         self.W_mem = self.W_mem.to(hidden_states.device)
-        hidden_states = mq @ self.W_mem + hidden_states
+        self.z = self.z.to(hidden_states.device)
         
+        mq = self.phi(self.W_mq(hidden_states)) # (bsz, seq_len, 2d_mem * nu)
+        denom = torch.einsum("ij,ikj->ik", self.z, mq)[..., None] + 1e-5
+        hidden_states = mq @ self.W_mem / denom + hidden_states
+
         out = self.layer(hidden_states=hidden_states, **kwargs)
         
         mem_tokens = out[0][:, -self.num_mem_tokens:]
@@ -36,19 +66,25 @@ class AssociativeLayerWrapper(torch.nn.Module):
         return out
 
     def update_mem(self, mem_tokens):
-        pass
-        mk = self.W_mk(mem_tokens)
-        mv = self.W_mv(mem_tokens) # (bsz, num_mem_tokens, d_model)
+        mk = self.phi(self.W_mk(mem_tokens))
+        new_mv = self.W_mv(mem_tokens) # (bsz, num_mem_tokens, d_model)
+        denom = torch.einsum("ij,ikj->ik", self.z, mk)[..., None] + 1e-5
+        prev_mv = mk @ self.W_mem / denom
+        mv = new_mv - prev_mv
 
-        associations =  torch.einsum('ijk,ijt->ikt', mk, mv) # (bsz, num_mem_tokens, d_mem, d_model)
+        mb = torch.sigmoid(self.W_mb(mem_tokens))[..., 0]
+
+        associations =  torch.einsum('ijk,ijt,ij->ikt', mk, mv, mb) # (bsz, num_mem_tokens, d_mem, d_model)
         self.W_mem = self.W_mem + associations
+        self.z = self.z + mk.sum(dim=1)
         # self.W_mem = self.W_mem / torch.linalg.norm(self.W_mem)
-        self.W_mem = self.W_mem / self.W_mem.std(dim=(1, 2))[:, None, None]
+        # self.W_mem = self.W_mem / self.W_mem.std(dim=(1, 2))[:, None, None]
 
 
     def zero_mem(self):
         # self.seg_num = 0
-        self.W_mem = torch.zeros(1, self.d_mem, self.d_model)
+        self.W_mem = torch.zeros(1, 2 * self.d_mem * self.nu, self.d_model)
+        self.z = torch.ones(1, 2 * self.d_mem * self.nu)
 
 
 
