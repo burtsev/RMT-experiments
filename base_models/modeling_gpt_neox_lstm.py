@@ -419,13 +419,13 @@ class GPTNeoXLSTM(nn.Module):
 
     def forward(self, hidden_states):
         # LSTM expects input of shape (batch, seq_len, features)
-        # Process through the first LSTM layer
-        hidden_states, _ = self.lstm_h_to_4h(hidden_states)
-        hidden_states = self.act(hidden_states)
+        # # Process through the first LSTM layer
+        # hidden_states, _ = self.lstm_h_to_4h(hidden_states)
+        # hidden_states = self.act(hidden_states)
 
-        # Process through the second LSTM layer
-        hidden_states, _ = self.lstm_4h_to_h(hidden_states)
-        return hidden_states
+        # # Process through the second LSTM layer
+        # hidden_states, _ = self.lstm_4h_to_h(hidden_states)
+        return self.lstm(hidden_states)
 
 
 class GPTNeoXLayer(nn.Module):
