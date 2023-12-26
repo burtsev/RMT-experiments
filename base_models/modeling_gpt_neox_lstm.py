@@ -402,31 +402,17 @@ class GPTNeoXMLP(nn.Module):
 class GPTNeoXLSTM(nn.Module):
     def __init__(self, config):
         super().__init__()
-
-        self.lstm = nn.LSTM(config.hidden_size,config.hidden_size,batch_first=True)
-
-        # LSTM layer to replace dense_h_to_4h
-        # self.lstm_h_to_4h = nn.LSTM(input_size=config.hidden_size,
-        #                             hidden_size=config.intermediate_size,
-        #                             batch_first=True)
-
-        # # LSTM layer to replace dense_4h_to_h
-        # self.lstm_4h_to_h = nn.LSTM(input_size=config.intermediate_size,
-        #                             hidden_size=config.hidden_size,
-        #                             batch_first=True)
-        
-        # self.act = ACT2FN[config.hidden_act]
+        # One LSTM layer with input and output dimensions equal to hidden_size
+        self.lstm = nn.LSTM(input_size=config.hidden_size,
+                            hidden_size=config.hidden_size,
+                            batch_first=True)
+        self.act = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_states):
         # LSTM expects input of shape (batch, seq_len, features)
-        # # Process through the first LSTM layer
-        # hidden_states, _ = self.lstm_h_to_4h(hidden_states)
-        # hidden_states = self.act(hidden_states)
-
-        # # Process through the second LSTM layer
-        # hidden_states, _ = self.lstm_4h_to_h(hidden_states)
-        return self.lstm(hidden_states)
-
+        hidden_states, _ = self.lstm(hidden_states)
+        hidden_states = self.act(hidden_states)
+        return hidden_states
 
 class GPTNeoXLayer(nn.Module):
     def __init__(self, config):
