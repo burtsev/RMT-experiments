@@ -403,7 +403,7 @@ class GPTNeoXLSTM(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.lstm = nn.LSTMCell(config.hidden_size,config.hidden_size)
+        self.lstm = nn.LSTM(config.hidden_size,config.hidden_size,batch_first=True)
 
         # LSTM layer to replace dense_h_to_4h
         # self.lstm_h_to_4h = nn.LSTM(input_size=config.hidden_size,
