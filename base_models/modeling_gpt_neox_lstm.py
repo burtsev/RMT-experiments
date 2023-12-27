@@ -423,7 +423,7 @@ class GPTNeoXLayer(nn.Module):
         self.post_attention_dropout = nn.Dropout(config.hidden_dropout)
         self.post_mlp_dropout = nn.Dropout(config.hidden_dropout)
         self.attention = GPTNeoXAttention(config)
-        self.mlp = GPTNeoXLSTM(config)
+        self.mlp = GPTNeoXMLP(config)
 
         if getattr(config, 'use_parallel_adapter', False):
             # parallel adapter uses n_embd from config as hidden_size (compatible with gpt2 configs)
@@ -553,6 +553,9 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         self.emb_dropout = nn.Dropout(config.hidden_dropout)
         self.layers = nn.ModuleList([GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.lstm = nn.LSTM(input_size=config.hidden_size,
+                            hidden_size=config.hidden_size,
+                            batch_first=True)
 
         self.gradient_checkpointing = False
 
@@ -704,6 +707,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
         hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = hidden_states + lstm(hidden_states) #LSTM
         # Add last hidden state
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
