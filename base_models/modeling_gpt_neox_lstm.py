@@ -701,7 +701,10 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     output_attentions=output_attentions,
                 )
             hidden_states = outputs[0]
-            hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
+            # hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
+            hidden_states_mem, _ = self.lstm(hidden_states)
+            hidden_states = hidden_states + hidden_states_mem
+            
             if use_cache is True:
                 presents = presents + (outputs[1],)
             if output_attentions:
