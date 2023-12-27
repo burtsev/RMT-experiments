@@ -670,6 +670,8 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         presents = () if use_cache else None
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
+        lstm_state = None 
+
         for i, (layer, layer_past) in enumerate(zip(self.layers, past_key_values)):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -702,9 +704,9 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 )
             hidden_states = outputs[0]
             # hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
-            hidden_states_mem, _ = self.lstm(hidden_states)
+            hidden_states_mem, lstm_state = self.lstm(hidden_states, lstm_state)
             hidden_states = hidden_states + hidden_states_mem
-            
+
             if use_cache is True:
                 presents = presents + (outputs[1],)
             if output_attentions:
