@@ -701,12 +701,13 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     output_attentions=output_attentions,
                 )
             hidden_states = outputs[0]
+            hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
             if use_cache is True:
                 presents = presents + (outputs[1],)
             if output_attentions:
                 all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
-        hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
+        
         hidden_states = self.final_layer_norm(hidden_states)
        
         # Add last hidden state
