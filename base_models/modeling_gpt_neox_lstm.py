@@ -458,22 +458,24 @@ class GPTNeoXLayer(nn.Module):
         attn_output = self.post_attention_dropout(attn_output)
         outputs = attention_layer_outputs[1:]
 
-        if self.use_parallel_residual:
-            # pseudocode:
-            # x = x + attn(ln1(x)) + mlp(ln2(x))
-            mlp_input = hidden_states
-            mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
-            mlp_output = self.post_mlp_dropout(mlp_output)
-            hidden_states = mlp_output + attn_output + hidden_states
-        else:
-            # pseudocode:
-            # x = x + attn(ln1(x))
-            # x = x + mlp(ln2(x))
-            attn_output = attn_output + hidden_states
-            mlp_input = attn_output
-            mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
-            mlp_output = self.post_mlp_dropout(mlp_output)
-            hidden_states = mlp_output + attn_output
+        hidden_states = attn_output + hidden_states
+
+        # if self.use_parallel_residual:
+        #     # pseudocode:
+        #     # x = x + attn(ln1(x)) + mlp(ln2(x))
+        #     mlp_input = hidden_states
+        #     mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
+        #     mlp_output = self.post_mlp_dropout(mlp_output)
+        #     hidden_states = mlp_output + attn_output + hidden_states
+        # else:
+        #     # pseudocode:
+        #     # x = x + attn(ln1(x))
+        #     # x = x + mlp(ln2(x))
+        #     attn_output = attn_output + hidden_states
+        #     mlp_input = attn_output
+        #     mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
+        #     mlp_output = self.post_mlp_dropout(mlp_output)
+        #     hidden_states = mlp_output + attn_output
 
         # paraller adapter for FFN transformer block
         if getattr('config', 'use_parallel_adapter', False) and self.parallel_adapter_mode == 'ffn':
