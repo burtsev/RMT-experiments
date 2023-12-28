@@ -408,6 +408,7 @@ class GPTNeoXLayer(nn.Module):
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.post_attention_dropout = nn.Dropout(config.hidden_dropout)
         self.post_mlp_dropout = nn.Dropout(config.hidden_dropout)
+        self.linear = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.attention = GPTNeoXAttention(config)
         self.mlp = GPTNeoXMLP(config)
 
@@ -424,6 +425,7 @@ class GPTNeoXLayer(nn.Module):
     def forward(
         self,
         hidden_states: Optional[torch.FloatTensor],
+        input_states: Optional[torch.FloatTensor],
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -447,7 +449,7 @@ class GPTNeoXLayer(nn.Module):
         if self.use_parallel_residual:
             # pseudocode:
             # x = x + attn(ln1(x)) + mlp(ln2(x))
-            mlp_input = hidden_states
+            mlp_input = self.linear(torch.cat([hidden_states, input_states], dim=-1)) #hidden_states
             mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
             mlp_output = self.post_mlp_dropout(mlp_output)
             hidden_states = mlp_output + attn_output + hidden_states
@@ -455,7 +457,7 @@ class GPTNeoXLayer(nn.Module):
             # pseudocode:
             # x = x + attn(ln1(x))
             # x = x + mlp(ln2(x))
-            attn_output = attn_output + hidden_states
+            attn_output = attn_output + self.linear(torch.cat([hidden_states, input_states], dim=-1))
             mlp_input = attn_output
             mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
             mlp_output = self.post_mlp_dropout(mlp_output)
@@ -539,7 +541,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         self.emb_dropout = nn.Dropout(config.hidden_dropout)
         self.layers = nn.ModuleList([GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.linear = nn.Linear(config.hidden_size * 2, config.hidden_size)
+        #self.linear = nn.Linear(config.hidden_size * 2, config.hidden_size)
 
         self.gradient_checkpointing = False
 
@@ -660,7 +662,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            hidden_states = self.linear(torch.cat([hidden_states, input_states], dim=-1))
+            # hidden_states = self.linear(torch.cat([hidden_states, input_states], dim=-1))
 
             if self.gradient_checkpointing and self.training:
 
@@ -674,6 +676,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 outputs = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(layer),
                     hidden_states,
+                    input_states,
                     attention_mask,
                     position_ids,
                     head_mask[i],
@@ -681,6 +684,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             else:
                 outputs = layer(
                     hidden_states,
+                    input_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     head_mask=head_mask[i],
