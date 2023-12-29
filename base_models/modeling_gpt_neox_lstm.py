@@ -399,18 +399,18 @@ class GPTNeoXMLP(nn.Module):
         hidden_states = self.dense_4h_to_h(hidden_states)
         return hidden_states
 
-class GPTNeoXLSTM(nn.Module):
+class GPTNeoXGRU(nn.Module):
     def __init__(self, config):
         super().__init__()
         # One LSTM layer with input and output dimensions equal to hidden_size
-        self.lstm = nn.LSTM(input_size=config.hidden_size,
+        self.gru = nn.GRU(input_size=config.hidden_size,
                             hidden_size=config.hidden_size,
                             batch_first=True)
         self.act = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_states):
         # LSTM expects input of shape (batch, seq_len, features)
-        hidden_states, _ = self.lstm(hidden_states)
+        hidden_states, _ = self.gru(hidden_states)
         hidden_states = self.act(hidden_states)
         return hidden_states
 
@@ -423,7 +423,7 @@ class GPTNeoXLayer(nn.Module):
         self.post_attention_dropout = nn.Dropout(config.hidden_dropout)
         self.post_mlp_dropout = nn.Dropout(config.hidden_dropout)
         self.attention = GPTNeoXAttention(config)
-        self.mlp = GPTNeoXMLP(config)
+        self.mlp = GPTNeoXGRU(config)
 
         if getattr(config, 'use_parallel_adapter', False):
             # parallel adapter uses n_embd from config as hidden_size (compatible with gpt2 configs)
@@ -460,22 +460,22 @@ class GPTNeoXLayer(nn.Module):
 
         hidden_states = attn_output + hidden_states
 
-        # if self.use_parallel_residual:
-        #     # pseudocode:
-        #     # x = x + attn(ln1(x)) + mlp(ln2(x))
-        #     mlp_input = hidden_states
-        #     mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
-        #     mlp_output = self.post_mlp_dropout(mlp_output)
-        #     hidden_states = mlp_output + attn_output + hidden_states
-        # else:
-        #     # pseudocode:
-        #     # x = x + attn(ln1(x))
-        #     # x = x + mlp(ln2(x))
-        #     attn_output = attn_output + hidden_states
-        #     mlp_input = attn_output
-        #     mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
-        #     mlp_output = self.post_mlp_dropout(mlp_output)
-        #     hidden_states = mlp_output + attn_output
+        if self.use_parallel_residual:
+            # pseudocode:
+            # x = x + attn(ln1(x)) + mlp(ln2(x))
+            mlp_input = hidden_states
+            mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))
+            mlp_output = self.post_mlp_dropout(mlp_output)
+            hidden_states = mlp_output + attn_output + hidden_states
+        else:
+            # pseudocode:
+            # x = x + attn(ln1(x))
+            # x = x + mlp(ln2(x))
+            attn_output = attn_output + hidden_states
+            mlp_input = attn_output
+            mlp_output = self.mlp(self.post_attention_layernorm(attn_output))
+            mlp_output = self.post_mlp_dropout(mlp_output)
+            hidden_states = mlp_output + attn_output
 
         # paraller adapter for FFN transformer block
         if getattr('config', 'use_parallel_adapter', False) and self.parallel_adapter_mode == 'ffn':
@@ -706,9 +706,8 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                 )
             hidden_states = outputs[0]
             # hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
-            hidden_states_mem, lstm_state = self.lstm(hidden_states, lstm_state)
+            # hidden_states_mem, lstm_state = self.lstm(hidden_states, lstm_state)
             # hidden_states = hidden_states + hidden_states_mem
-            hidden_states = hidden_states_mem
 
             if use_cache is True:
                 presents = presents + (outputs[1],)
