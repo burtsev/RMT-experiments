@@ -707,7 +707,8 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             hidden_states = outputs[0]
             # hidden_states = hidden_states + self.lstm(hidden_states) #LSTM
             hidden_states_mem, lstm_state = self.lstm(hidden_states, lstm_state)
-            hidden_states = hidden_states + hidden_states_mem
+            # hidden_states = hidden_states + hidden_states_mem
+            hidden_states = hidden_states_mem
 
             if use_cache is True:
                 presents = presents + (outputs[1],)
