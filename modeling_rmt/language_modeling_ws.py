@@ -101,7 +101,7 @@ class RecurrentWrapper(torch.nn.Module):
 
         cell_outputs = []
         for seg_num, segment in enumerate(segmented):
-            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True, output_attentions=output_attentions)
+            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True, output_attentions=True)
             cell_outputs.append(cell_out)
             self.manage_gradients(memory_state, seg_num)
 
