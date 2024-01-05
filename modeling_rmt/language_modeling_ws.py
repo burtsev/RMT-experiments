@@ -9,7 +9,7 @@ class MemoryCell(torch.nn.Module):
         self.model = base_model
         self.create_memory(num_mem_tokens)
 
-    def create_memory(self, num_mem_tokens):
+    def create_memory(self, num_mem_tokens): 
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
         memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
@@ -19,7 +19,7 @@ class MemoryCell(torch.nn.Module):
         self.read_memory_position = range(num_mem_tokens)
         self.write_memory_position = range(-num_mem_tokens, 0)
 
-    def set_memory(self, input_shape):
+    def set_memory(self, input_shape): # Prepares the memory tensor to be concatenated with input embeddings, repeating it to match the batch size.
         memory = self.memory.repeat(input_shape[0], 1, 1)
         return memory
 
@@ -60,9 +60,16 @@ class MemoryCell(torch.nn.Module):
         if self.num_mem_tokens in {0, None}:
             return attention_mask
         else:
+            # Create a new mask filled with ones (full attention)
             mask = torch.ones(*shape[:2], dtype=torch.int64).to(attention_mask.device)
-            mask[:, self.num_mem_tokens:-self.num_mem_tokens] = attention_mask
-            return mask
+
+            # Crop the last token from the original attention mask
+            cropped_attention_mask = attention_mask[:, :-1] if attention_mask.shape[1] > 0 else attention_mask
+
+            # Insert the cropped attention mask in the middle
+            mask[:, self.num_mem_tokens: -(self.num_mem_tokens + 1)] = cropped_attention_mask
+            
+        return mask
     
     def process_output(self, model_outputs, **kwargs):
         if self.num_mem_tokens not in {0, None}:
@@ -89,12 +96,13 @@ class RecurrentWrapper(torch.nn.Module):
         self.rmt_config = rmt_kwargs
 
     def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
+        
         memory_state = None
         segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
         cell_outputs = []
         for seg_num, segment in enumerate(segmented):
-            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True)
+            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True, output_attentions=True)
             cell_outputs.append(cell_out)
             self.manage_gradients(memory_state, seg_num)
 
@@ -149,10 +157,11 @@ class RecurrentWrapper(torch.nn.Module):
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
+        full_att = tuple([torch.cat(layer_att, dim=1) for layer_att in zip(*[o.attentions for o in cell_outputs])])
 
         labels = kwargs.get('labels')
         if labels is not None:
-            shift_labels = labels[..., 1:].contiguous()
+            shift_labels = labels[..., 1:].contiguous() # shifts the labels to predict the next token based on the previous tokens
             shift_logits = full_logits[..., :-1, :].contiguous()
             flat_labels = shift_labels.view(-1)
             flat_logits = shift_logits.view(-1, shift_logits.size(-1))
@@ -173,6 +182,7 @@ class RecurrentWrapper(torch.nn.Module):
         segment_keys = ['loss', 'logits']
         if kwargs.get('output_attentions'):
             segment_keys.append('attentions')
+            out['attentions'] = full_att
         if kwargs.get('output_hidden_states'):
             segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states
