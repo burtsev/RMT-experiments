@@ -94,7 +94,7 @@ class RecurrentWrapper(torch.nn.Module):
 
         cell_outputs = []
         for seg_num, segment in enumerate(segmented):
-            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True)
+            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state, output_hidden_states=True, output_attentions=True)
             cell_outputs.append(cell_out)
             self.manage_gradients(memory_state, seg_num)
 
@@ -149,6 +149,7 @@ class RecurrentWrapper(torch.nn.Module):
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
         full_hidden_states = tuple([torch.cat(layer_hs, dim=1) for layer_hs in zip(*[o.hidden_states for o in cell_outputs])])
+        full_att = tuple([torch.cat(layer_att, dim=1) for layer_att in zip(*[o.attentions for o in cell_outputs])])
 
         labels = kwargs.get('labels')
         if labels is not None:
@@ -173,6 +174,7 @@ class RecurrentWrapper(torch.nn.Module):
         segment_keys = ['loss', 'logits']
         if kwargs.get('output_attentions'):
             segment_keys.append('attentions')
+            out['attentions'] = full_att
         if kwargs.get('output_hidden_states'):
             segment_keys.append('hidden_states')
             out['hidden_states'] = full_hidden_states

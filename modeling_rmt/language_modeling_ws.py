@@ -9,7 +9,7 @@ class MemoryCell(torch.nn.Module):
         self.model = base_model
         self.create_memory(num_mem_tokens)
 
-    def create_memory(self, num_mem_tokens): 
+    def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
         memory_dim =  getattr(self.model.config, 'n_embd', self.model.config.hidden_size)
