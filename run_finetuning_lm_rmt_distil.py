@@ -90,6 +90,8 @@ parser.add_argument('--d_mem', type=int, default=None, help='number of rows in a
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--max_val_segments', type=int, default=1, help='maximal segment number on validation')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='Randomly choose segment number from 1 to max_n_segments')
+parser.add_argument('--random_segment_size', action='store_true', default=False, help='Randomly choose segment size from input_size to max_n_segments * input_size with powers of 2')
+parser.add_argument('--prev_seg_kv', action='store_true', default=False, help='propagate kv from previous segment')
 parser.add_argument('--sum_loss', action='store_true', default=False,
                     help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
@@ -168,7 +170,6 @@ if __name__ == '__main__':
     #     open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     prepare_run(args, logger, logger_fmt)
-
     if args.tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     else:
@@ -179,7 +180,16 @@ if __name__ == '__main__':
 
     with accelerator.main_process_first():
         if 'wikitext' in args.task_name:
+            
+            def process_unk(x):
+                x['text'] = x['text'].replace('<unk>', tokenizer.unk_token)
+                return x
+    
             raw_datasets = datasets.load_dataset('wikitext', args.task_name)
+
+            # should it really be like this?
+            if 'wikitext-2' not in args.task_name:
+                raw_datasets = raw_datasets.map(process_unk)
             column_names = raw_datasets["train"].column_names
             text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -218,7 +228,7 @@ if __name__ == '__main__':
             }
         else:
             result = {
-                k: [t[max({0, i - history_size}) : i + block_size] for i in range(history_size, total_length, block_size)]
+                k: [t[max({0, i - history_size - block_size}) : i] for i in range(history_size + block_size, total_length, block_size)]
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
@@ -238,7 +248,7 @@ if __name__ == '__main__':
 
             # make sliding window att mask
             attention_mask = attention_mask[:, None, :].repeat(1, attention_mask.shape[1], 1)
-            attention_mask = (torch.tril(attention_mask, 0) * (1 - torch.tril(attention_mask, -block_size)))
+            attention_mask = (torch.tril(attention_mask, 0) * (1 - torch.tril(torch.ones_like(attention_mask), -block_size)))
 
             collated = {'input_ids': input_ids,
                         'labels': labels, 
@@ -247,12 +257,12 @@ if __name__ == '__main__':
             if input_ids.shape[1] != block_size:
                 # take only labels for last block (maybe use all labels during training?)
                 labels_mask = torch.ones_like(input_ids, dtype=torch.bool)
-                # for i, lens in enumerate(input_lens):
-                    # labels_mask[i, max(lens - block_size, 0): lens] = True
+                for i, lens in enumerate(input_lens):
+                    labels_mask[i, max(lens - block_size, 0): lens] = True
                 collated['labels_mask'] = labels_mask
 
             if getattr(args, 'vary_n_segments', False):
-                n_segments = random.randint(0, args.max_n_segments)
+                n_segments = random.randint(1, args.max_n_segments + 1)
                 n_tokens = n_segments * block_size
                 for k in collated:
                     collated[k] = collated[k][:, -n_tokens:]
@@ -277,10 +287,29 @@ if __name__ == '__main__':
                 collated['labels_mask'] = labels_mask
         
             if getattr(args, 'vary_n_segments', False) and not valid:
-                n_segments = random.randint(1, args.max_n_segments)
+                n_segments = random.randint(1, args.max_n_segments + 1)
                 n_tokens = n_segments * block_size
                 for k in collated:
                     collated[k] = collated[k][:, -n_tokens:]
+            if getattr(args, 'random_segment_size', False):
+                def is_power_of_two(n):
+                    if (n == 0):
+                        return False
+                    while (n != 1):
+                        if (n % 2 != 0):
+                            return False
+                        n = n // 2
+             
+                    return True
+                if valid:
+                    n_segments = args.max_val_segments
+                else:
+                    assert is_power_of_two(args.max_n_segments)
+                    power = int(math.log2(args.max_n_segments))
+                    logn_segments = random.randint(0, power)
+                    n_segments = 2 ** logn_segments
+                for k in collated:
+                    collated[k] = torch.stack(torch.chunk(collated[k], n_segments, dim=1), dim=1)
 
             return collated
 
@@ -514,6 +543,10 @@ if __name__ == '__main__':
     trainer = Trainer(args, accelerator, model, optimizer, train_dataloader, valid_dataloader,  # train_sampler,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       batch_metrics_fn=batch_metrics_fn,
+                      forward_kwargs={
+                          'input_segmented': getattr(args, 'random_segment_size', False),
+                          'sliding_window': getattr(args, 'prev_seg_kv', False)
+                      },
                       generate_kwargs={})
 
     if not args.validate_only:
