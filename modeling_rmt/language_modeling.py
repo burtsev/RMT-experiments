@@ -28,7 +28,7 @@ class MemoryCell(torch.nn.Module):
         prev_embs = self.model.transformer.wpe.weight.detach()
         self.model.transformer.wpe = torch.nn.Embedding(new_num_pos, emb_dim)
         with torch.no_grad():
-            self.model.transformer.wpe.weight[num_mem_tokens:-num_mem_tokens] = prev_embs
+            self.model.transformer.wpe.weight[num_mem_tokens:len(self.model.transformer.wpe.weight)-num_mem_tokens] = prev_embs
         for layer in self.model.transformer.h:
             layer.attn.bias = torch.tril(torch.ones((new_num_pos, new_num_pos), dtype=torch.uint8)).view(
                 1, 1, new_num_pos, new_num_pos
@@ -68,6 +68,11 @@ class MemoryCell(torch.nn.Module):
         seg_kwargs['inputs_embeds'] = inputs_embeds
         if kwargs.get('attention_mask') is not None:
             seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape)
+            if kwargs.get('prev_attn_mask') is not None:
+                seg_kwargs['attention_mask'] = torch.cat([kwargs['prev_attn_mask'], seg_kwargs['attention_mask']], dim=-1)
+            if 'prev_attn_mask' in seg_kwargs:
+                seg_kwargs.pop('prev_attn_mask')
+            
         seg_kwargs['output_hidden_states'] = True
 
         read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
@@ -156,18 +161,22 @@ class RecurrentWrapper(torch.nn.Module):
         cell_outputs = []
         past_key_values = None
         num_mem_tokens = self.memory_cell.num_mem_tokens
+        prev_attn_mask = None
         for seg_num, segment in enumerate(segmented):
-            seg_len = segment['input_ids'].size(-2)
+            seg_len = segment['input_ids'].size(-1)
             cell_out, memory_state = self.memory_cell(**segment, 
                                                       memory_state=memory_state, 
                                                       output_hidden_states=True, 
                                                       use_cache=sliding_window, 
-                                                      past_key_values=past_key_values
+                                                      past_key_values=past_key_values,
+                                                      prev_attn_mask=prev_attn_mask
                                                     )
+            
             if sliding_window:
+                prev_attn_mask = segment['attention_mask']
                 past_key_values = [
                     [
-                        k_or_v[..., -(num_mem_tokens+seg_len):-num_mem_tokens, :] 
+                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :] 
                         for k_or_v in seg_kv
                     ] 
                     for seg_kv in cell_out['past_key_values']
@@ -180,7 +189,8 @@ class RecurrentWrapper(torch.nn.Module):
                                    output_attentions=output_attentions, 
                                    output_hidden_states=output_hidden_states)
         return out
-    
+
+        
     def generate(self, input_ids, attention_mask, **generate_kwargs):
         memory_state = None
         segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
@@ -283,7 +293,17 @@ class Distillator(torch.nn.Module):
         for p in self.teacher.parameters():
             p.requires_grad = False
     
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
+    def forward(self, 
+                input_ids, 
+                labels=None, 
+                labels_mask=None, 
+                inputs_embeds=None, 
+                attention_mask=None, 
+                output_attentions=None, 
+                output_hidden_states=None,
+                input_segmented=False,
+                sliding_window=False,
+                ):
         with torch.no_grad():
             if self.training:
                 if input_segmented:
@@ -315,7 +335,8 @@ class Distillator(torch.nn.Module):
             attention_mask=attention_mask, 
             output_attentions=output_attentions, 
             output_hidden_states=output_hidden_states,
-            input_segmented=input_segmented
+            input_segmented=input_segmented,
+            sliding_window=sliding_window
         )
         
         if input_segmented:
