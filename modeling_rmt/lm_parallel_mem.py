@@ -61,11 +61,17 @@ class MemoryCell(torch.nn.Module):
     def wrap_positional_embeddings(self, num_mem_tokens):
 
         num_pos_embs, emb_dim = self.model.transformer.wpe.weight.shape
+
+        new_num_pos = num_pos_embs + 2 * num_mem_tokens
+
         prev_embs = self.model.transformer.wpe.weight.detach()
-        self.model.transformer.wpe = torch.nn.Embedding(2 * num_mem_tokens + num_pos_embs, emb_dim)
+        self.model.transformer.wpe = torch.nn.Embedding(new_num_pos, emb_dim)
         with torch.no_grad():
             self.model.transformer.wpe.weight[num_mem_tokens:-num_mem_tokens] = prev_embs
-
+        for layer in self.model.transformer.h:
+            layer.layer.attn.bias = torch.tril(torch.ones((new_num_pos, new_num_pos), dtype=torch.uint8)).view(
+                1, 1, new_num_pos, new_num_pos
+            )
 
     def set_memory(self, input_shape):
         memory = self.memory.repeat(input_shape[0], 1, 1)
@@ -96,6 +102,11 @@ class MemoryCell(torch.nn.Module):
         seg_kwargs['inputs_embeds'] = inputs_embeds
         if kwargs.get('attention_mask') is not None:
             seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape)
+            if kwargs.get('prev_attn_mask') is not None:
+                seg_kwargs['attention_mask'] = torch.cat([kwargs['prev_attn_mask'], seg_kwargs['attention_mask']], dim=-1)
+            if 'prev_attn_mask' in seg_kwargs:
+                seg_kwargs.pop('prev_attn_mask')
+        
         seg_kwargs['output_hidden_states'] = True
         read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
         write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
@@ -139,6 +150,8 @@ class MemoryCell(torch.nn.Module):
             ce_loss = ce_loss_fn(flat_logits, flat_labels)
             out['ce_loss'] = ce_loss
 
+        if kwargs.get('use_cache') is not None:
+            out['past_key_values'] = model_outputs.past_key_values
             
         return out
 
@@ -150,7 +163,17 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
+    def forward(self, 
+                input_ids, 
+                labels=None, 
+                labels_mask=None, 
+                inputs_embeds=None, 
+                attention_mask=None, 
+                output_attentions=None, 
+                output_hidden_states=None,
+                input_segmented=False,
+                sliding_window=False,
+                ):
         if input_segmented:
             n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
             segmented = [dict(
@@ -160,16 +183,40 @@ class RecurrentWrapper(torch.nn.Module):
                 labels=labels[:, i] if not (labels is None) else None, 
                 labels_mask=labels_mask[:, i] if not (labels_mask is None) else None, 
             ) for i in range(n_segs)]
+            labels = torch.cat([labels[:, i] for i in range(n_segs)], dim=1)
+            if labels_mask is not None:
+                labels_mask = torch.cat([labels_mask[:, i] for i in range(n_segs)], dim=1)
         else:
             segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, labels_mask=labels_mask)
         cell_outputs = []
+        past_key_values = None
+        num_mem_tokens = self.memory_cell.num_mem_tokens
+        prev_attn_mask = None
+
         self.memory_cell.zero_mem()
         for seg_num, segment in enumerate(segmented):
-            cell_out = self.memory_cell(**segment, output_hidden_states=True, zero_mem=False)
+            seg_len = segment['input_ids'].size(-1)
+            cell_out = self.memory_cell(**segment, 
+                                        output_hidden_states=True, 
+                                        zero_mem=False,
+                                        use_cache=sliding_window,
+                                        past_key_values=past_key_values,
+                                        prev_attn_mask=prev_attn_mask
+                                       )
+            if sliding_window:
+                prev_attn_mask = segment['attention_mask']
+                past_key_values = [
+                    [
+                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :] 
+                        for k_or_v in seg_kv
+                    ] 
+                    for seg_kv in cell_out['past_key_values']
+                ]
             cell_outputs.append(cell_out)
         self.memory_cell.zero_mem()
 
-
+        
+        
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
                                    output_attentions=output_attentions, 
