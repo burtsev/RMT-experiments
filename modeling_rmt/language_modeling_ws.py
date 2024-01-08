@@ -95,7 +95,7 @@ class RecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None):
+    def forward(self, input_ids, attention_mask, labels=None, labels_mask=None, inputs_embeds=None, output_attentions=None, output_hidden_states=None):
         
         memory_state = None
         segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask)
