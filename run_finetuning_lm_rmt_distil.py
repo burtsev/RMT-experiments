@@ -10,6 +10,7 @@ import random
 import torch
 import numpy as np
 import datasets
+from datasets import Dataset
 from torch.utils.data import DataLoader
 
 from lm_experiments_tools import Trainer, TrainerArgs
@@ -314,11 +315,8 @@ if __name__ == '__main__':
             return collated
 
     with accelerator.main_process_first():
-        train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
-                                                        batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, val_history_size), 
-                                                             batched=True, desc=f"Grouping valid in chunks of {block_size}")
-
+        train_dataset = Dataset.from_dict(group_texts(tokenized_datasets['train'].to_dict(), block_size, history_size))
+        valid_dataset = Dataset.from_dict(group_texts(tokenized_datasets['validation'].to_dict(), block_size, val_history_size))
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     # shuffle train data each epoch (one loop over train_dataset)
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
@@ -344,9 +342,11 @@ if __name__ == '__main__':
                                          collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
     # get test dataset
+    
     if 'test' in tokenized_datasets.keys():
-        test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, block_size, val_history_size),
-                                                      batched=True, desc=f"Grouping test in chunks of {block_size}")
+        with accelerator.main_process_first():
+            test_dataset = Dataset.from_dict(group_texts(tokenized_datasets['test'].to_dict(), block_size, val_history_size))
+
         test_dataloader = alignedDataLoader(test_dataset, batch_size=per_worker_batch_size,
                                             collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
