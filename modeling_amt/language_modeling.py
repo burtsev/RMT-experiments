@@ -40,7 +40,7 @@ class AssociativeLayerWrapper(torch.nn.Module):
         self.W_mb = torch.nn.Linear(d_model, 1)
 
         self.W_mem = torch.zeros(1, 2 * d_mem * nu, d_model)
-        self.z = torch.ones(1, 2 * d_mem * nu)
+        self.z = torch.zeros(1, 2 * d_mem * nu)
         self.W_mem.requires_grad_(False)
         self.z.requires_grad_(False)
         
@@ -50,26 +50,41 @@ class AssociativeLayerWrapper(torch.nn.Module):
         self.zero_mem()
     
         self.layer = layer
+        
+        self.generate_mode = False
 
-    def forward(self, hidden_states, **kwargs):
+    def associate(self, hidden_states):
+
         self.W_mem = self.W_mem.to(hidden_states.device)
         self.z = self.z.to(hidden_states.device)
         
         mq = self.phi(self.W_mq(hidden_states)) # (bsz, seq_len, 2d_mem * nu)
-        denom = torch.einsum("ij,ikj->ik", self.z, mq)[..., None] + 1e-5
-        hidden_states = mq @ self.W_mem / denom + hidden_states
 
+        # crutch for dataparallel
+        # mq += 0 * self.W_mb(hidden_states).sum() * self.W_mk(hidden_states).sum() * self.W_mv(hidden_states).sum() 
+
+        num = torch.einsum('ijk,ikt->ijt', mq, self.W_mem)
+        denom = torch.einsum("ik,ijk->ij", self.z, mq)[..., None] + 1e-5
+        hidden_states = num / denom + hidden_states
+
+        return hidden_states
+    
+    def forward(self, hidden_states, **kwargs):
+
+        hidden_states = self.associate(hidden_states)
         out = self.layer(hidden_states=hidden_states, **kwargs)
-        
-        mem_tokens = out[0][:, -self.num_mem_tokens:]
-        self.update_mem(mem_tokens)
+        if not self.generate_mode:
+            mem_tokens = out[0][:, -self.num_mem_tokens:]
+            self.update_mem(mem_tokens)
         return out
 
     def update_mem(self, mem_tokens):
         mk = self.phi(self.W_mk(mem_tokens))
         new_mv = self.W_mv(mem_tokens) # (bsz, num_mem_tokens, d_model)
+
+        num = torch.einsum('ijk,ikt->ijt', mk, self.W_mem)
         denom = torch.einsum("ij,ikj->ik", self.z, mk)[..., None] + 1e-5
-        prev_mv = mk @ self.W_mem / denom
+        prev_mv = num / denom
         mv = new_mv - prev_mv
 
         mb = torch.sigmoid(self.W_mb(mem_tokens))[..., 0]
@@ -77,19 +92,17 @@ class AssociativeLayerWrapper(torch.nn.Module):
         associations =  torch.einsum('ijk,ijt,ij->ikt', mk, mv, mb) # (bsz, num_mem_tokens, d_mem, d_model)
         self.W_mem = self.W_mem + associations
         self.z = self.z + mk.sum(dim=1)
-        # self.W_mem = self.W_mem / torch.linalg.norm(self.W_mem)
-        # self.W_mem = self.W_mem / self.W_mem.std(dim=(1, 2))[:, None, None]
 
 
     def zero_mem(self):
         # self.seg_num = 0
         self.W_mem = torch.zeros(1, 2 * self.d_mem * self.nu, self.d_model)
-        self.z = torch.ones(1, 2 * self.d_mem * self.nu)
+        self.z = torch.zeros(1, 2 * self.d_mem * self.nu)
 
 
 
 class AssociativeMemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens, d_mem, layers_attr: str = 'transformer.h'):
+    def __init__(self, base_model, num_mem_tokens, d_mem, layers_attr: str = 'transformer.h', wrap_pos=True):
         super().__init__()
         self.model = base_model
         self.num_mem_tokens = num_mem_tokens
@@ -106,7 +119,14 @@ class AssociativeMemoryCell(torch.nn.Module):
         for i in range(len(self.layers)):
             self.layers[i] = AssociativeLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens, self.d_mem)
         self.create_memory(num_mem_tokens)
-        self.wrap_positional_embeddings(num_mem_tokens)
+        self.wrap_pos = wrap_pos
+        if wrap_pos:
+            self.wrap_positional_embeddings(num_mem_tokens)
+    
+    def generate_mode(self, is_on):
+        for layer in self.layers:
+            layer.generate_mode = is_on
+    
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
@@ -118,9 +138,14 @@ class AssociativeMemoryCell(torch.nn.Module):
         num_pos_embs, emb_dim = self.model.transformer.wpe.weight.shape
         prev_embs = self.model.transformer.wpe.weight.detach()
         self.model.transformer.wpe = torch.nn.Embedding(num_mem_tokens + num_pos_embs, emb_dim)
-        with torch.no_grad():
-            self.model.transformer.wpe.weight[:-num_mem_tokens] = prev_embs
 
+        new_num_pos = num_pos_embs + num_mem_tokens
+        with torch.no_grad():
+            self.model.transformer.wpe.weight[:len(self.model.transformer.wpe.weight)-num_mem_tokens] = prev_embs
+        for layer in self.model.transformer.h:
+            layer.layer.attn.bias = torch.tril(torch.ones((new_num_pos, new_num_pos), dtype=torch.uint8)).view(
+                1, 1, new_num_pos, new_num_pos
+            )
 
     def set_memory(self, input_shape):
         memory = self.memory.repeat(input_shape[0], 1, 1)
@@ -130,13 +155,12 @@ class AssociativeMemoryCell(torch.nn.Module):
         for layer in self.layers:
             layer.zero_mem()
 
-    def forward(self, input_ids, labels=None, labels_mask=None, zero_mem=True, **kwargs):
+    def forward(self, input_ids, labels=None, labels_mask=None, zero_mem=False, **kwargs):
         if zero_mem:
             self.zero_mem()
 
-        memory_state = self.set_memory(input_ids.shape)
 
-        seg_kwargs = self.process_input(input_ids, memory_state, **kwargs)
+        seg_kwargs = self.process_input(input_ids, **kwargs)
 
         out = self.model(**seg_kwargs)
 
@@ -144,9 +168,9 @@ class AssociativeMemoryCell(torch.nn.Module):
 
         return out
 
-    def process_input(self, input_ids, memory_state, **kwargs):
+    def process_input(self, input_ids, **kwargs):
+        memory_state = self.set_memory(input_ids.shape)
         seg_kwargs = dict(**kwargs)
-
         inputs_embeds = kwargs.get('inputs_embeds')
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -156,16 +180,20 @@ class AssociativeMemoryCell(torch.nn.Module):
         seg_kwargs['inputs_embeds'] = inputs_embeds
         if kwargs.get('attention_mask') is not None:
             seg_kwargs['attention_mask'] = self.pad_attention_mask(kwargs['attention_mask'], inputs_embeds.shape)
+            if kwargs.get('prev_attn_mask') is not None:
+                seg_kwargs['attention_mask'] = torch.cat([kwargs['prev_attn_mask'], seg_kwargs['attention_mask']], dim=-1)
+            if 'prev_attn_mask' in seg_kwargs:
+                seg_kwargs.pop('prev_attn_mask')
         seg_kwargs['output_hidden_states'] = True
 
-
-        num_pos_embs = self.model.transformer.wpe.weight.shape[0]
-        ordinary_pos = torch.arange(0, input_ids.size(1), dtype=torch.long, device=input_ids.device)
-        write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
-        seg_kwargs['position_ids'] = torch.cat([
-            ordinary_pos, 
-            write_pos
-        ]).long().unsqueeze(0)
+        if self.wrap_pos:
+            num_pos_embs = self.model.transformer.wpe.weight.shape[0]
+            ordinary_pos = torch.arange(0, input_ids.size(1), dtype=torch.long, device=input_ids.device)
+            write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
+            seg_kwargs['position_ids'] = torch.cat([
+                ordinary_pos, 
+                write_pos
+            ]).long().unsqueeze(0)
         return seg_kwargs
     
     def pad_attention_mask(self, attention_mask, shape):
@@ -201,6 +229,24 @@ class AssociativeMemoryCell(torch.nn.Module):
             ce_loss = ce_loss_fn(flat_logits, flat_labels)
             out['ce_loss'] = ce_loss
 
+        if kwargs.get('use_cache') is not None:
+            out['past_key_values'] = model_outputs.past_key_values
+        
+        return out
+    
+    def generate(self, input_ids, attention_mask, zero_mem=False, **generate_kwargs):
+        if zero_mem:
+            self.zero_mem()
+        
+        
+        self.generate_mode(True)
+        seg_kwargs = self.process_input(input_ids, attention_mask=attention_mask)
+        out = self.model.generate(
+            inputs_embeds=seg_kwargs['inputs_embeds'][:, :-self.num_mem_tokens], 
+            attention_mask=seg_kwargs['attention_mask'][:, :-self.num_mem_tokens], 
+            **generate_kwargs
+        )
+        self.generate_mode(False)
         return out
     
 
@@ -211,7 +257,17 @@ class AssociativeRecurrentWrapper(torch.nn.Module):
         self.memory_cell = memory_cell
         self.rmt_config = rmt_kwargs
 
-    def forward(self, input_ids, labels=None, labels_mask=None, inputs_embeds=None, attention_mask=None, output_attentions=None, output_hidden_states=None, input_segmented=False):
+    def forward(self, 
+                input_ids, 
+                labels=None, 
+                labels_mask=None, 
+                inputs_embeds=None, 
+                attention_mask=None, 
+                output_attentions=None, 
+                output_hidden_states=None,
+                input_segmented=False,
+                sliding_window=False,
+                ):
         if input_segmented:
             n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
             segmented = [dict(
@@ -221,12 +277,34 @@ class AssociativeRecurrentWrapper(torch.nn.Module):
                 labels=labels[:, i] if not (labels is None) else None, 
                 labels_mask=labels_mask[:, i] if not (labels_mask is None) else None, 
             ) for i in range(n_segs)]
+            labels = torch.cat([labels[:, i] for i in range(n_segs)], dim=1)
+            if labels_mask is not None:
+                labels_mask = torch.cat([labels_mask[:, i] for i in range(n_segs)], dim=1)
         else:
             segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, labels_mask=labels_mask)
         cell_outputs = []
+        past_key_values = None
+        num_mem_tokens = self.memory_cell.num_mem_tokens
+        prev_attn_mask = None
         self.memory_cell.zero_mem()
         for seg_num, segment in enumerate(segmented):
-            cell_out = self.memory_cell(**segment, output_hidden_states=True, zero_mem=False)
+            seg_len = segment['input_ids'].size(-1)
+            cell_out = self.memory_cell(**segment,  
+                                        output_hidden_states=True, 
+                                        use_cache=sliding_window, 
+                                        past_key_values=past_key_values,
+                                        prev_attn_mask=prev_attn_mask,
+                                        zero_mem=False
+            )
+            if sliding_window:
+                prev_attn_mask = segment['attention_mask']
+                past_key_values = [
+                    [
+                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :].detach() 
+                        for k_or_v in seg_kv
+                    ] 
+                    for seg_kv in cell_out['past_key_values']
+                ]
             cell_outputs.append(cell_out)
         self.memory_cell.zero_mem()
 
@@ -316,3 +394,13 @@ class AssociativeRecurrentWrapper(torch.nn.Module):
         
         memory_state = memory_state.detach()
         return False
+    
+    def generate(self, input_ids, attention_mask, **generate_kwargs):
+        segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
+
+        for seg_num, segment in enumerate(segmented[:-1]):
+            cell_out = self.memory_cell(**segment, output_hidden_states=True, zero_mem=False)
+
+        final_segment = segmented[-1]
+        out = self.memory_cell.generate(**final_segment, zero_mem=False, **generate_kwargs)
+        return out
