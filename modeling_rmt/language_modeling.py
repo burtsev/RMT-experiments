@@ -4,11 +4,13 @@ from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 class MemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens):
+    def __init__(self, base_model, num_mem_tokens, wrap_pos=True):
         super().__init__()
         self.model = base_model
         self.create_memory(num_mem_tokens)
-        self.wrap_positional_embeddings(num_mem_tokens)
+        self.wrap_pos = wrap_pos
+        if wrap_pos:
+            self.wrap_positional_embeddings(num_mem_tokens)
 
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
@@ -23,15 +25,15 @@ class MemoryCell(torch.nn.Module):
     def wrap_positional_embeddings(self, num_mem_tokens):
 
         num_pos_embs, emb_dim = self.model.transformer.wpe.weight.shape
-
+        self.old_num_pos = num_pos_embs
         new_num_pos = num_pos_embs + 2 * num_mem_tokens
         prev_embs = self.model.transformer.wpe.weight.detach()
         self.model.transformer.wpe = torch.nn.Embedding(new_num_pos, emb_dim)
         with torch.no_grad():
-            self.model.transformer.wpe.weight[num_mem_tokens:len(self.model.transformer.wpe.weight)-num_mem_tokens] = prev_embs
+            self.model.transformer.wpe.weight[num_mem_tokens:num_pos_embs+num_mem_tokens] = prev_embs
         for layer in self.model.transformer.h:
-            layer.attn.bias = torch.tril(torch.ones((new_num_pos, new_num_pos), dtype=torch.uint8)).view(
-                1, 1, new_num_pos, new_num_pos
+            layer.attn.bias = torch.tril(torch.ones((new_num_pos + num_pos_embs, new_num_pos + num_pos_embs), dtype=torch.uint8)).view(
+                1, 1, new_num_pos + num_pos_embs, new_num_pos + num_pos_embs
             )
 
     def set_memory(self, input_shape):
@@ -53,12 +55,16 @@ class MemoryCell(torch.nn.Module):
             memory_state = self.set_memory(input_ids.shape)
 
         seg_kwargs = self.process_input(input_ids, memory_state, attention_mask=attention_mask)
-        out = self.model.generate(inputs_embeds=seg_kwargs['inputs_embeds'], attention_mask=seg_kwargs['attention_mask'], **generate_kwargs)
+        out = self.model.generate(
+            inputs_embeds=seg_kwargs['inputs_embeds'][:, :-self.num_mem_tokens], 
+            attention_mask=seg_kwargs['attention_mask'][:, :-self.num_mem_tokens], 
+            **generate_kwargs
+        )
         return out
 
     def process_input(self, input_ids, memory_state, **kwargs):
         seg_kwargs = dict(**kwargs)
-        num_pos_embs = self.model.transformer.wpe.weight.shape[0]
+        
         inputs_embeds = kwargs.get('inputs_embeds')
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -75,12 +81,19 @@ class MemoryCell(torch.nn.Module):
             
         seg_kwargs['output_hidden_states'] = True
 
-        read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
-        write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
-        seg_kwargs['position_ids'] = torch.cat([
-            read_ordinary_pos, 
-            write_pos
-        ]).long().unsqueeze(0)
+        if self.wrap_pos:
+            num_pos_embs = self.model.transformer.wpe.weight.shape[0]
+            read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
+            write_pos = torch.arange(
+                self.old_num_pos + self.num_mem_tokens, 
+                self.old_num_pos + 2 * self.num_mem_tokens, 
+                dtype=torch.long, 
+                device=input_ids.device
+            )
+            seg_kwargs['position_ids'] = torch.cat([
+                read_ordinary_pos, 
+                write_pos
+            ]).long().unsqueeze(0)
 
         return seg_kwargs
     
@@ -142,7 +155,6 @@ class RecurrentWrapper(torch.nn.Module):
                 sliding_window=False,
                 ):
         memory_state = None
-
         if input_segmented:
             n_segs = input_ids.shape[1] if not (input_ids is None) else inputs_embeds.shape[1]
 
@@ -176,7 +188,7 @@ class RecurrentWrapper(torch.nn.Module):
                 prev_attn_mask = segment['attention_mask']
                 past_key_values = [
                     [
-                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :] 
+                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :].detach() 
                         for k_or_v in seg_kv
                     ] 
                     for seg_kv in cell_out['past_key_values']
