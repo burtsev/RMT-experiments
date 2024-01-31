@@ -12,12 +12,15 @@ class ParallelLayerWrapper(torch.nn.Module):
         self.d_model = d_model
         self.create_memory(self.num_mem_tokens)
         self.zero_mem()
+        self.generate_mode = False
 
     def forward(self, hidden_states, **kwargs):
-        hidden_states[:, :self.num_mem_tokens] = self.prev_mem_tokens
+        if hidden_states.shape[1] != 1 or not self.generate_mode:
+            hidden_states[:, :self.num_mem_tokens] = self.prev_mem_tokens
         out = self.layer(hidden_states=hidden_states, **kwargs)
-        mem_tokens = out[0][:, -self.num_mem_tokens:]
-        self.update_mem(mem_tokens)
+        if not self.generate_mode:
+            mem_tokens = out[0][:, -self.num_mem_tokens:]
+            self.update_mem(mem_tokens)
         return out
 
     def update_mem(self, mem_tokens):
@@ -33,7 +36,7 @@ class ParallelLayerWrapper(torch.nn.Module):
 
 
 class MemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens, layers_attr: str = 'transformer.h'):
+    def __init__(self, base_model, num_mem_tokens, layers_attr: str = 'transformer.h', wrap_pos=True):
         super().__init__()
         self.model = base_model
         self.num_mem_tokens = num_mem_tokens
@@ -45,12 +48,17 @@ class MemoryCell(torch.nn.Module):
         self.layers_attrs = layers_attr.split('.')
         for i, attr in enumerate(self.layers_attrs):
             self.layers = getattr(self.layers, attr)
-        
         for i in range(len(self.layers)):
             self.layers[i] = ParallelLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens)
         self.create_memory(num_mem_tokens)
-        self.wrap_positional_embeddings(num_mem_tokens)
-
+        self.wrap_pos = wrap_pos
+        if wrap_pos:
+            self.wrap_positional_embeddings(num_mem_tokens)
+    
+    def generate_mode(self, is_on):
+        for layer in self.layers:
+            layer.generate_mode = is_on
+    
     def create_memory(self, num_mem_tokens):
         self.num_mem_tokens = num_mem_tokens
         embeddings = self.model.get_input_embeddings()
@@ -81,18 +89,19 @@ class MemoryCell(torch.nn.Module):
         for layer in self.layers:
             layer.zero_mem()
 
-    def forward(self, input_ids, labels=None, labels_mask=None, zero_mem=True, **kwargs):
+    def forward(self, input_ids, labels=None, labels_mask=None, zero_mem=False, **kwargs):
+
         if zero_mem:
             self.zero_mem()
-        memory_state = self.set_memory(input_ids.shape)
-        seg_kwargs = self.process_input(input_ids, memory_state, **kwargs)
+        seg_kwargs = self.process_input(input_ids, **kwargs)
         out = self.model(**seg_kwargs)
         out = self.process_output(out, labels, labels_mask, **kwargs)
         return out
 
-    def process_input(self, input_ids, memory_state, **kwargs):
+    def process_input(self, input_ids, **kwargs):
+
+        memory_state = self.set_memory(input_ids.shape)
         seg_kwargs = dict(**kwargs)
-        num_pos_embs = self.model.transformer.wpe.weight.shape[0]
         inputs_embeds = kwargs.get('inputs_embeds')
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -106,14 +115,16 @@ class MemoryCell(torch.nn.Module):
                 seg_kwargs['attention_mask'] = torch.cat([kwargs['prev_attn_mask'], seg_kwargs['attention_mask']], dim=-1)
             if 'prev_attn_mask' in seg_kwargs:
                 seg_kwargs.pop('prev_attn_mask')
-        
-        seg_kwargs['output_hidden_states'] = True
-        read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
-        write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
-        seg_kwargs['position_ids'] = torch.cat([
-            read_ordinary_pos, 
-            write_pos
-        ]).long().unsqueeze(0)
+        if self.wrap_pos:
+
+            num_pos_embs = self.model.transformer.wpe.weight.shape[0]
+            seg_kwargs['output_hidden_states'] = True
+            read_ordinary_pos = torch.arange(0, input_ids.size(1) + self.num_mem_tokens, dtype=torch.long, device=input_ids.device)
+            write_pos = torch.arange(num_pos_embs - self.num_mem_tokens, num_pos_embs, dtype=torch.long, device=input_ids.device)
+            seg_kwargs['position_ids'] = torch.cat([
+                read_ordinary_pos, 
+                write_pos
+            ]).long().unsqueeze(0)
         return seg_kwargs
     
     def pad_attention_mask(self, attention_mask, shape):
@@ -154,7 +165,22 @@ class MemoryCell(torch.nn.Module):
             out['past_key_values'] = model_outputs.past_key_values
             
         return out
-
+    
+    def generate(self, input_ids, attention_mask, zero_mem=False, **generate_kwargs):
+        if zero_mem:
+            self.zero_mem()
+        
+        
+        self.generate_mode(True)
+        seg_kwargs = self.process_input(input_ids, attention_mask=attention_mask)
+        out = self.model.generate(
+            inputs_embeds=seg_kwargs['inputs_embeds'][:, :-self.num_mem_tokens], 
+            attention_mask=seg_kwargs['attention_mask'][:, :-self.num_mem_tokens], 
+            **generate_kwargs
+        )
+        self.generate_mode(False)
+        return out
+    
 
 class RecurrentWrapper(torch.nn.Module):
     def __init__(self, memory_cell, **rmt_kwargs):
@@ -207,7 +233,7 @@ class RecurrentWrapper(torch.nn.Module):
                 prev_attn_mask = segment['attention_mask']
                 past_key_values = [
                     [
-                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :] 
+                        k_or_v[..., -(num_mem_tokens+seg_len):k_or_v.size(-2)-num_mem_tokens, :].detach() 
                         for k_or_v in seg_kv
                     ] 
                     for seg_kv in cell_out['past_key_values']
@@ -302,3 +328,13 @@ class RecurrentWrapper(torch.nn.Module):
         
         memory_state = memory_state.detach()
         return False
+    
+    def generate(self, input_ids, attention_mask, **generate_kwargs):
+        segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
+
+        for seg_num, segment in enumerate(segmented[:-1]):
+            cell_out = self.memory_cell(**segment, output_hidden_states=True, zero_mem=False)
+
+        final_segment = segmented[-1]
+        out = self.memory_cell.generate(**final_segment, zero_mem=False, **generate_kwargs)
+        return out
