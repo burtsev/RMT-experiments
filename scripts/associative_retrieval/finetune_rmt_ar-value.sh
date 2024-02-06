@@ -3,7 +3,6 @@
 export WANDB_PROJECT=associative_retrieval
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 NP=4
-# set -e
 cd ../..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
@@ -16,12 +15,12 @@ BACKBONE_CLS=base_models.modeling_gpt_neox:GPTNeoXForCausalLM
 TASK_NAME=associative_retrieval_v3
 METRIC=exact_match
 
-MEMORY_SIZE=4
-ITERS=100000
+MEMORY_SIZE=8
+ITERS=300000
 TBS=512
 INPUT_SIZE=2048
-KEY_SIZE=1
-NUM_PAIRS=3
+KEY_SIZE=2
+NUM_PAIRS=50
 MAX_N_SEGMENTS=$((NUM_PAIRS + 1))
 
 
@@ -29,7 +28,7 @@ for MEMORY_SIZE in $MEMORY_SIZE
 do 
 BS=128
 
-for N in 1
+for N in 2
 do
 
 for VALUE_SIZE in 1
@@ -97,7 +96,8 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_fine
         --dataset_path /home/rodkin/rmt/datasets/associative_retrieval \
         --train_size 1000000 \
         --valid_size 1000 \
-        --test_size 10000 
+        --test_size 10000 \
+        --save_best
 done
 done
 done

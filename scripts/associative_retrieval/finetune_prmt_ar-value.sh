@@ -99,7 +99,8 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29572 run_fine
         --layers_attr gpt_neox.layers \
         --train_size 100000 \
         --valid_size 1000 \
-        --test_size 30000 
+        --test_size 30000 \
+        --save_best
 done
 done
 done

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 
 export WANDB_PROJECT=associative_retrieval
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 NP=4
-# set -e
 cd ../..
 
 CUBLAS_WORKSPACE_CONFIG=:4096:2
@@ -16,31 +15,38 @@ BACKBONE_CLS=base_models.modeling_gpt_neox:GPTNeoXForCausalLM
 TASK_NAME=associative_retrieval_v3
 METRIC=exact_match
 
+
+MODEL_NAME=gpt-neox
 MEMORY_SIZE=4
-ITERS=100000
-TBS=256
+
+TBS=512
 INPUT_SIZE=2048
-KEY_SIZE=2
-NUM_PAIRS=50
 D_MEM=32
-MAX_N_SEGMENTS=$((NUM_PAIRS + 1))
 
+NUMS_PAIRS=(1 2 3 5 10 20 40 50)
+KEY_SIZES=(1 1 1 1 1 2 2 2)
+VALUE_SIZES=(1 1 1 1 1 1 1 1)
+BSS=(128 128 128 128 128 128 64 64)
+ITERSS=(2000 10000 10000 10000 10000 10000 10000 30000)
 
-for MEMORY_SIZE in $MEMORY_SIZE
-do 
-BS=64
+# ITERSS=(1 1 1 1 1 1 1 1)
+
+DIM=128
+NUM_LAYERS=4
+
 
 for N in 1
 do
 
-for VALUE_SIZE in 1
+for (( j=0; j<${#NUMS_PAIRS[@]}; j++ ))
 do
+NUM_PAIRS=${NUMS_PAIRS[j]}
+KEY_SIZE=${KEY_SIZES[j]}
+VALUE_SIZE=${VALUE_SIZES[j]}
+MAX_N_SEGMENTS=$((NUM_PAIRS + 1))
+BS=${BSS[j]}
+ITERS=${ITERSS[j]}
 
-for DIM in 128
-do
-
-for NUM_LAYERS in 4
-do
 
 BLOCK_SIZE=$((KEY_SIZE + VALUE_SIZE + 2))
 cd base_models/gptconfigs
@@ -59,6 +65,14 @@ do
 for SCHEDULER in linear
 do
 
+if [[ j -gt 0 ]]
+then
+    PREV_NUM_PAIRS=${NUMS_PAIRS[j-1]}
+    PREV_MAX_N_SEGMENTS=$((PREV_NUM_PAIRS + 1))
+    MODEL_CPT=../runs/${TASK_NAME}/amt/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZES[j-1]}-v${VALUE_SIZES[j-1]}-p${PREV_NUM_PAIRS}-${PREV_MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${PREV_MAX_N_SEGMENTS}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N 
+else
+    MODEL_CPT=None
+fi
 
 GRAD_ACC_STEPS=$(($TBS/($BS*$NP)))
 ACCEL_CONFIG=./accel_configs/accelerate.yaml
@@ -67,7 +81,7 @@ echo gradient accumulation steps $GRAD_ACC_STEPS
 
 echo RUNNING: TASK_NAME MEMORY_SIZE KEY_SIZE VALUE_SIZE N_SEG  MODEL_NAME MODEL_CLS LR N
 echo RUNNING: $TASK_NAME $MEMORY_SIZE $KEY_SIZE $VALUE_SIZE $MAX_N_SEGMENTS $MODEL_NAME $MODEL_CLS  $LR $N
-accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29572 run_finetuning_associative_retrieval.py \
+accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_finetuning_associative_retrieval.py \
         --task_name $TASK_NAME \
         --model_path ../runs/${TASK_NAME}/amt/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZE}-v${VALUE_SIZE}-p${NUM_PAIRS}-${MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${K2}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N \
         --model_cfg $MODEL_CFG \
@@ -101,10 +115,8 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29572 run_fine
         --train_size 1000000 \
         --valid_size 1000 \
         --test_size 10000 \
+        --model_cpt $MODEL_CPT \
         --save_best
-done
-done
-done
 done
 done
 done
