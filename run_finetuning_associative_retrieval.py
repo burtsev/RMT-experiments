@@ -358,7 +358,7 @@ if __name__ == '__main__':
                                     
 
         ## load cpt of rmt
-        if args.model_cpt:
+        if args.model_cpt and args.model_cpt != 'None':
             model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
             cpt = torch.load(model_cpt, map_location='cpu')
             model.load_state_dict(cpt, strict=False)
@@ -494,7 +494,8 @@ if __name__ == '__main__':
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
                     #   generate_kwargs={'max_new_tokens': int(args.value_size * 2)}
-                      generate_kwargs={'pad_token_id': 102}
+                      generate_kwargs={'pad_token_id': 102},
+                      best_possible_metric=1.0
                       )
 
     # try:
