@@ -396,6 +396,7 @@ class AssociativeRecurrentWrapper(torch.nn.Module):
         return False
     
     def generate(self, input_ids, attention_mask, **generate_kwargs):
+        self.memory_cell.zero_mem()
         segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
 
         for seg_num, segment in enumerate(segmented[:-1]):
@@ -403,4 +404,5 @@ class AssociativeRecurrentWrapper(torch.nn.Module):
 
         final_segment = segmented[-1]
         out = self.memory_cell.generate(**final_segment, zero_mem=False, **generate_kwargs)
+        self.memory_cell.zero_mem()
         return out
