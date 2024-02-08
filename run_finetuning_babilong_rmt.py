@@ -463,7 +463,7 @@ if __name__ == '__main__':
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
                       generate_kwargs={"pad_token_id": id_pad_value, "max_new_tokens":10},
-                      best_possible_metric=1.0
+                      stop_metric_condition=lambda m: m >= 0.995
     )
 
     if not args.validate_only:
