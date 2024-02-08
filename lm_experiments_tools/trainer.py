@@ -138,7 +138,7 @@ class Trainer:
                  metrics_fn=None,
                  forward_kwargs={},
                  generate_kwargs={},
-                 best_possible_metric=None,
+                 stop_metric_condition=None,
                  ) -> None:
         """Implements training loop with horovod multi-gpu, apex fp16 & grad accumulation support.
 
@@ -190,7 +190,7 @@ class Trainer:
         self.metrics_fn = metrics_fn
         self.forward_kwargs = deepcopy(forward_kwargs)
         self.generate_kwargs = deepcopy(generate_kwargs)
-        self.best_possible_metric = best_possible_metric
+        self.stop_metric_condition = stop_metric_condition
 
         self.device = self.accelerator.device
 
@@ -627,8 +627,8 @@ class Trainer:
                     self.early_stopping_counter > self.args.early_stopping_patience:
                 logger.info('Early stopping triggered: stopping training...')
                 break
-            if self.best_possible_metric is not None and best_valid_metric == self.best_possible_metric:
-                logger.info('Best possible metric achieved: stopping training...')
+            if self.stop_metric_condition is not None and self.stop_metric_condition(best_valid_metric):
+                logger.info('Stop metric condition achieved: stopping training...')
                 break
         # clean-up
         pbar.close()
