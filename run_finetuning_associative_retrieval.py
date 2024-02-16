@@ -54,6 +54,7 @@ parser.add_argument('--task_name', type=str, help='Scrolls task name: "gov_repor
 parser.add_argument('--report_to', type=str, default='wandb', help='')
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
+
 parser.add_argument('--wrap_pos', action='store_true', default=False,
                     help='Wrap positional encoding for memory tokens (default: False)')
 parser.add_argument('--working_dir', type=str, default='.',
@@ -93,7 +94,9 @@ parser.add_argument('--test_size', type=int, default=2000, help='number of sampl
 parser.add_argument('--segment_size', type=int, default=128, help='number of useful tokens in a segment')
 parser.add_argument('--d_mem', type=int, default=None, help='number of rows in associative matrix')
 parser.add_argument('--layers_attr', type=str, default=None, help='attribute of model, which contains layers')
-
+parser.add_argument('--rewrite_setting', action='store_true', default=False,
+                    help='keys can occur several times')
+parser.add_argument('--desired_metric', type=float, default=1.0, help='metric to stop training')
 # Aydar # RMT args 
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
@@ -142,11 +145,16 @@ from tqdm.auto import tqdm
 
 def generate_pairs(key_size, value_size, num_pairs, num_samples):
     keys = torch.empty((num_samples, num_pairs, key_size))
-    for i in tqdm(range(num_samples)):
-        key = torch.randperm(NUM_SYMBOLS ** key_size)[:num_pairs]
-        for j in range(key_size):
-            keys[i, :, j] = key % NUM_SYMBOLS
-            key //= NUM_SYMBOLS
+
+    if not rewrite_setting:
+        for i in tqdm(range(num_samples)):
+            key = torch.randperm(NUM_SYMBOLS ** key_size)[:num_pairs]
+            for j in range(key_size):
+                keys[i, :, j] = key % NUM_SYMBOLS
+                key //= NUM_SYMBOLS
+    else:
+        keys = torch.randint(0, NUM_SYMBOLS, (num_samples, num_pairs, key_size))
+
     
     # keys = torch.randint(0, NUM_SYMBOLS, (num_pairs * 2, key_size))
     # keys[:, 0] = torch.randint(1, NUM_SYMBOLS, (num_pairs * 2, ))
@@ -169,20 +177,29 @@ class ARDataset:
     def __init__(self, key_size, value_size, sample_len=1, num_samples=20_000):
         self.sample_len = sample_len
         self.keys, self.values = generate_pairs(key_size, value_size, sample_len, num_samples)
-
         # self.keys = keys.reshape(num_samples, -1)
         # self.values = values.reshape(num_samples, -1)
-        self.target_key_inds = torch.randint(sample_len, (num_samples, ))
-
+        if not rewrite_setting:
+            self.target_key_inds = torch.randint(sample_len, (num_samples, ))
+        else:
+            self.target_key_inds = torch.empty((num_samples,), dtype=torch.long)
+            for i in tqdm(range(num_samples)):
+                unique_keys = self.keys[i].unique(dim=0)
+                key = unique_keys[torch.randperm(len(unique_keys))[0]]
+                try:
+                    idx = torch.max(torch.where(torch.all(self.keys[i] == key, dim=-1))[0], dim=0)[0].long()
+                except Exception:
+                    print(f"{self.keys[i]}, {key}")
+                    raise 1
+                assert torch.all(self.keys[i][idx] == key)
+                self.target_key_inds[i] = idx
     def __getitem__(self, idx):
         keys, values, tgt_ind = self.keys[idx], self.values[idx], self.target_key_inds[idx]
         # dim = 0 if keys.ndim == 1 else 1
         # keys = torch.chunk(keys, self.sample_len, dim=dim)
         # values = torch.chunk(values, self.sample_len, dim=dim)
-
         sample = {'keys': keys, 'values': values, 'target_key_ind': tgt_ind}
         return sample
-    
     def __len__(self):
         return self.keys.shape[0]
     
@@ -203,6 +220,7 @@ if __name__ == '__main__':
     if args.model_path is None:
         logger.warning('model_path is not set: config, logs and checkpoints will not be saved.')
 
+    rewrite_setting = args.rewrite_setting
     # # create model path and save configuration
     # # todo: use prepare run
     # if accelerator.is_main_process and args.model_path is not None:
@@ -276,6 +294,8 @@ if __name__ == '__main__':
     logger.info(f'preparing dataset for: {args.task_name}')
     
     dataset_name = f"AR_k{args.key_size}_v{args.value_size}_p{args.num_pairs}"
+    if rewrite_setting:
+        dataset_name += '_rewrite'
     path = os.path.join(args.dataset_path, dataset_name)
     with accelerator.main_process_first():
         if os.path.exists(path):
@@ -495,7 +515,7 @@ if __name__ == '__main__':
                       batch_metrics_fn=batch_metrics_fn,
                     #   generate_kwargs={'max_new_tokens': int(args.value_size * 2)}
                       generate_kwargs={'pad_token_id': 102},
-                      best_possible_metric=1.0
+                      stop_metric_condition=lambda m: m >= args.desired_metric
                       )
 
     # try:
