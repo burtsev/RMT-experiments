@@ -108,6 +108,7 @@ parser.add_argument('--d_mem', type=int, default=None, help='number of rows in a
 parser.add_argument('--layers_attr', type=str, default=None, help='attribute of model, which contains layers')
 parser.add_argument('--wrap_pos', action='store_true', default=False,
                     help='Wrap positional encoding for memory tokens (default: False)')
+parser.add_argument('--desired_metric', type=float, default=1.0, help='metric to stop training')
 # tokenizer
 # todo: add wordpiece tokenizers support?
 parser.add_argument('--tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
@@ -467,7 +468,7 @@ if __name__ == '__main__':
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
                       generate_kwargs={"pad_token_id": id_pad_value, "max_new_tokens":10},
-                      stop_metric_condition=lambda m: m >= 0.995
+                      stop_metric_condition=lambda m: m >= args.desired_metric
     )
 
     if not args.validate_only:
