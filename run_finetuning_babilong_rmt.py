@@ -85,6 +85,7 @@ parser.add_argument('--model_type', type=str, default='encoder-decoder',
 
 # Babilong parameters
 parser.add_argument('--sample_size', type=int, default=None, help='max number of tokens in sample')
+parser.add_argument('--test_sample_size', type=int, default=None, help='max number of tokens in sample')
 parser.add_argument('--max_n_facts', type=int, default=None, help='drop samples with higher number of facts')
 parser.add_argument('--task_start_pct', type=float, default=None, help='left border of facts in sample, between 0 and 1')
 parser.add_argument('--task_end_pct', type=float, default=None, help='right border of facts in sample, between task_start_pct and 1')
@@ -201,7 +202,10 @@ if __name__ == '__main__':
     else:
         sample_size = args.sample_size - qa_margin
         train_sample_size = args.sample_size - qa_margin
-    test_sample_size = args.sample_size - qa_margin
+    if args.test_sample_size is None:
+        test_sample_size = args.sample_size - qa_margin
+    else: 
+        test_sample_size = args.test_sample_size - qa_margin
     max_sentence_len = None
     if (args.task_start_pct is not None) and (args.task_end_pct is not None):
         # do not sample sentences longer than task position range * 0.5
