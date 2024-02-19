@@ -1,7 +1,7 @@
 import math
 import torch
 from torch.nn import CrossEntropyLoss
-from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions, BaseModelOutputWithPastAndCrossAttentions
+from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from torch.nn.functional import relu as r
 
 def dpfp(x, nu=1):
@@ -30,8 +30,13 @@ class AssociativeLayerWrapper(torch.nn.Module):
         self.d_model = d_model
         self.num_mem_tokens = num_mem_tokens
         self.d_mem = d_mem
+
         nu = 3
-        self.nu = nu
+        self.d_key = 2 * nu * d_mem
+        self.phi = DPFP(nu)
+        # self.d_key = d_mem
+        # self.phi = torch.nn.Identity()
+
         self.W_mq = torch.nn.Linear(d_model, d_mem, bias=False)
         # torch.nn.init.zeros_(self.W_mq.weight)
         self.W_mk = torch.nn.Linear(d_model, d_mem, bias=False)
@@ -39,19 +44,19 @@ class AssociativeLayerWrapper(torch.nn.Module):
         torch.nn.init.zeros_(self.W_mv.weight)
         self.W_mb = torch.nn.Linear(d_model, 1)
 
-        self.W_mem = torch.zeros(1, 2 * d_mem * nu, d_model)
-        self.z = torch.zeros(1, 2 * d_mem * nu)
+        self.W_mem = torch.zeros(1, self.d_key, d_model)
+        self.z = torch.zeros(1, self.d_key)
         self.W_mem.requires_grad_(False)
         self.z.requires_grad_(False)
         
-        self.phi = DPFP(nu)
-
+        # self.ln = torch.nn.LayerNorm(d_model)
 
         self.zero_mem()
     
         self.layer = layer
         
         self.generate_mode = False
+        self.first_seg = True
 
     def associate(self, hidden_states):
 
@@ -65,39 +70,58 @@ class AssociativeLayerWrapper(torch.nn.Module):
 
         num = torch.einsum('ijk,ikt->ijt', mq, self.W_mem)
         denom = torch.einsum("ik,ijk->ij", self.z, mq)[..., None] + 1e-5
-        hidden_states = num / denom + hidden_states
+        hidden_states = num / denom
 
         return hidden_states
     
     def forward(self, hidden_states, **kwargs):
-
-        hidden_states = self.associate(hidden_states)
+        if not self.first_seg:
+            hidden_states = self.associate(
+                # self.ln(
+                    hidden_states
+                # )
+            ) + hidden_states
         out = self.layer(hidden_states=hidden_states, **kwargs)
         if not self.generate_mode:
             mem_tokens = out[0][:, -self.num_mem_tokens:]
             self.update_mem(mem_tokens)
+            self.first_seg = False
         return out
 
     def update_mem(self, mem_tokens):
+
+        self.W_mem = self.W_mem.to(mem_tokens.device)
+        self.z = self.z.to(mem_tokens.device)
+
         mk = self.phi(self.W_mk(mem_tokens))
         new_mv = self.W_mv(mem_tokens) # (bsz, num_mem_tokens, d_model)
-
-        num = torch.einsum('ijk,ikt->ijt', mk, self.W_mem)
-        denom = torch.einsum("ij,ikj->ik", self.z, mk)[..., None] + 1e-5
-        prev_mv = num / denom
+        if not self.first_seg:
+            num = torch.einsum('ijk,ikt->ijt', mk, self.W_mem)
+            denom = torch.einsum("ij,ikj->ik", self.z, mk)[..., None] + 1e-5
+            prev_mv = num / denom
+            new_info_coef = 1 - denom / (torch.linalg.norm(mk, dim=-1) ** 2 + 1e-5)[..., None]
+            new_info_coef = torch.clip(new_info_coef, 0, 1)
+        else: 
+            prev_mv = torch.zeros_like(new_mv, device=new_mv.device)
+            new_info_coef = 1
         mv = new_mv - prev_mv
+
+        # new_norm = torch.linalg.norm(new_mv, dim=-1)
+        # old_norm = torch.linalg.norm(prev_mv, dim=-1)
+        # new_info_coef = torch.clip(1 - old_norm / (new_norm + 1e-5), -10, 10)[..., None].detach()
+        # new_info_coef = 1 - denom
 
         mb = torch.sigmoid(self.W_mb(mem_tokens))[..., 0]
 
-        associations =  torch.einsum('ijk,ijt,ij->ikt', mk, mv, mb) # (bsz, num_mem_tokens, d_mem, d_model)
+        associations =  torch.einsum('ijk,ijt,ij->ikt', mk, mv, mb) # (bsz, d_mem, d_model)
         self.W_mem = self.W_mem + associations
-        self.z = self.z + mk.sum(dim=1)
+        self.z = self.z + (new_info_coef*mk).sum(dim=1)
 
 
     def zero_mem(self):
-        # self.seg_num = 0
-        self.W_mem = torch.zeros(1, 2 * self.d_mem * self.nu, self.d_model)
-        self.z = torch.zeros(1, 2 * self.d_mem * self.nu)
+        self.first_seg = True
+        self.W_mem = torch.zeros(1, self.d_key, self.d_model)
+        self.z = torch.zeros(1, self.d_key)
 
 
 
