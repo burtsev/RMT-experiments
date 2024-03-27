@@ -174,7 +174,7 @@ if __name__ == '__main__':
     if not args.from_pretrained:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
+        tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained, trust_remote_code=True)
 
     # Prepare datasets
     logger.info(f'preparing dataset for {args.task_dataset}')
@@ -294,7 +294,7 @@ if __name__ == '__main__':
         logger.info(f'Loading pretrained model: {args.from_pretrained}')
         base_model = model_cls.from_pretrained(args.from_pretrained, use_safetensors=False)
 
-        model.load_state_dict(base_model.state_dict(), strict=False)
+        model.load_state_dict(base_model.state_dict())
         del base_model
         logger.info(f'Added adapters')
 
@@ -325,27 +325,28 @@ if __name__ == '__main__':
         backbone_cpt = os.path.join(args.backbone_cpt, "pytorch_model.bin")
         # model = torch.load(backbone_cpt, map_location='cpu')
         cpt = torch.load(backbone_cpt, map_location='cpu')
-        model.load_state_dict(cpt, strict=False)
+        model.load_state_dict(cpt)
         logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
 
     # Pass memory settings to pretrained model
-    if args.num_mem_tokens is not None:
+    if True:
         memory_cell_cls = get_cls_by_name(args.memory_cell_cls)
         recurrent_wrapper_cls = get_cls_by_name(args.recurrent_wrapper_cls)
         logger.info(f'Wrapping in: {memory_cell_cls} and {recurrent_wrapper_cls}')
         
 
         mem_cell_args = dict(
-            base_model=model,
-            num_mem_tokens=args.num_mem_tokens,
+            base_model=model
         )
+        if args.num_mem_tokens is not None:
+            mem_cell_args['num_mem_tokens'] = args.num_mem_tokens
+            mem_cell_args['wrap_pos'] = args.wrap_pos
         if args.d_mem is not None:
             mem_cell_args['d_mem'] = args.d_mem
         
         if args.layers_attr is not None:
             mem_cell_args['layers_attr'] = args.layers_attr
-
-        cell = memory_cell_cls(**mem_cell_args, wrap_pos=args.wrap_pos)
+        cell = memory_cell_cls(**mem_cell_args)
         if args.segment_alignment not in {None, 'left'}:
             logger.info(f"Using custom segment alignment: {args.segment_alignment}")
         
@@ -364,7 +365,7 @@ if __name__ == '__main__':
         if args.model_cpt and args.model_cpt != 'None':
             model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
             cpt = torch.load(model_cpt, map_location='cpu')
-            model.load_state_dict(cpt, strict=False)
+            model.load_state_dict(cpt)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
     if args.freeze_model_weights:
@@ -398,8 +399,10 @@ if __name__ == '__main__':
     def keep_for_metrics_fn(batch, output):
         # select data from batch and model output that would be used to compute metrics
         data = {}
-        data['labels'] = batch['labels']
-        data['loss'] = output['loss']
+        if not args.validate_only:
+            data['labels'] = batch['labels']
+        if 'loss' in output:
+            data['loss'] = output['loss']
         data['target_text'] = batch['target_text']
         if 'logits' in output:
             data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
@@ -408,6 +411,16 @@ if __name__ == '__main__':
             data['generation_outputs'] = output['generation_outputs']
         return data
 
+    def extra_batch_metrics_fn(batch, output):
+        metrics = dict()
+        if 'generation_outputs' in output:
+            generation_outputs = tokenizer.batch_decode([d for d in output['generation_outputs']], add_special_tokens=False)
+            for i, o in enumerate(generation_outputs):
+                if '<|endoftext|>' in o:
+                    # print(f"gt: {data['target_text'][i]}, generated {o}")
+                    generation_outputs[i] = o.split('<|endoftext|>')[1].strip()
+            metrics['exact_match'] = np.mean([text == pred for text, pred in zip (batch['target_text'], generation_outputs)])
+        return metrics
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
     # synchronization is done by using temporay files on a shared filesystem
     # rank and number of workers is set by num_process and process_id params
@@ -453,16 +466,20 @@ if __name__ == '__main__':
                     logger.info(f"p_text: {predicted_labels[i]}")
 
                     logger.info('-' * 50)
-        try:
-            perplexity = math.exp(data["loss"].mean())
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
+        if 'loss' in data:
+            try:
+                perplexity = math.exp(data["loss"].mean())
+            except OverflowError:
+                perplexity = float("inf")
+            metrics["perplexity"] = perplexity
 
         return metrics
 
     ### booydar
-    batch_metrics_fn = lambda _, y: {key: y[key] for key in y.keys() if (('loss' in key) or ('!log' in key))}
+    batch_metrics_fn = lambda b, y: dict(
+        **{key: y[key] for key in y.keys() if (('loss' in key) or ('!log' in key))},
+        **extra_batch_metrics_fn(b, y)
+    )
     trainer = Trainer(args, accelerator, model, optimizer, train_dataloader, test_dataloader,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       ###booydar
@@ -501,4 +518,4 @@ if __name__ == '__main__':
         #     trainer.validate(valid_dataloader, write_tb=True, split='valid')
         if test_dataloader is not None:
             logger.info('Runnning validation on test data:')
-            trainer.validate(test_dataloader, write_tb=True, split='test')
+            trainer.validate(test_dataloader, split='test')
