@@ -96,6 +96,8 @@ parser.add_argument('--d_mem', type=int, default=None, help='number of rows in a
 parser.add_argument('--layers_attr', type=str, default=None, help='attribute of model, which contains layers')
 parser.add_argument('--rewrite_setting', action='store_true', default=False,
                     help='keys can occur several times')
+parser.add_argument('--no_correction', action='store_true', default=False,
+                    help='ARMT shmidhuber correction for rewriting')
 parser.add_argument('--desired_metric', type=float, default=1.0, help='metric to stop training')
 # Aydar # RMT args 
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
@@ -154,7 +156,18 @@ def generate_pairs(key_size, value_size, num_pairs, num_samples):
                 key //= NUM_SYMBOLS
     else:
         keys = torch.randint(0, NUM_SYMBOLS, (num_samples, num_pairs, key_size))
+    
+    values = torch.randint(0, NUM_SYMBOLS, (num_samples, num_pairs, value_size))
 
+    # if vary_n_pairs:
+    #     keys_list = []
+    #     values_list = []
+    #     for key in keys:
+    #         n = torch.randint(1, len(key)+1)
+    #         keys_list.append(key[-n:])
+    #         values_list.append(values[-n:])
+    #     keys = keys_list
+    #     values = values_list
     
     # keys = torch.randint(0, NUM_SYMBOLS, (num_pairs * 2, key_size))
     # keys[:, 0] = torch.randint(1, NUM_SYMBOLS, (num_pairs * 2, ))
@@ -168,7 +181,6 @@ def generate_pairs(key_size, value_size, num_pairs, num_samples):
     # selected_ids = torch.randperm(unique.shape[0])[:num_pairs]
     # keys = unique[selected_ids]
 
-    values = torch.randint(0, NUM_SYMBOLS, (num_samples, num_pairs, value_size))
     # values[:, 0] = torch.randint(1, NUM_SYMBOLS, (num_pairs, ))
     return keys, values
 
@@ -248,7 +260,30 @@ if __name__ == '__main__':
         def collate_fn(batch):
             keys = [b['keys'] for b in batch]
             values = [b['values'] for b in batch]
-            tgt_inds = [b['target_key_ind'].item() for b in batch]
+            
+            if not args.vary_n_segments:
+                tgt_inds = [b['target_key_ind'].item() for b in batch]
+                n = args.num_pairs
+            else:
+                n = torch.randint(1, len(keys[0])+1, size=())
+                keys = [x[-n:] for x in keys]
+                values = [x[-n:] for x in values]
+                if not rewrite_setting:
+                    tgt_inds = [torch.randint(0, n, size=()).item() for _ in range(len(keys))]
+                else:
+                    tgt_inds = []
+                    for i in range(len(keys)):
+                        unique_keys = keys[i].unique(dim=0)
+                        key = unique_keys[torch.randperm(len(unique_keys))[0]]
+                        try:
+                            idx = torch.max(torch.where(torch.all(keys[i] == key, dim=-1))[0], dim=0)[0].long()
+                        except Exception:
+                            print(f"{keys[i]}, {key}")
+                            raise 1
+                        assert torch.all(keys[i][idx] == key)
+                        tgt_inds.append(idx)
+
+
 
             bs = len(keys)
             sep_tokens = torch.ones(bs, 1) * sep_token
@@ -256,7 +291,7 @@ if __name__ == '__main__':
             gen_tokens = torch.ones(bs, 1) * gen_token
             sample = []
 
-            for i in range(args.num_pairs):
+            for i in range(n):
                 sample.append(torch.stack([k[i] for k in keys]))
                 sample.append(sep_tokens)
                 sample.append(torch.stack([v[i] for v in values]))
@@ -296,6 +331,8 @@ if __name__ == '__main__':
     dataset_name = f"AR_k{args.key_size}_v{args.value_size}_p{args.num_pairs}"
     if rewrite_setting:
         dataset_name += '_rewrite'
+    if args.vary_n_segments:
+        dataset_name += '_rnd'
     path = os.path.join(args.dataset_path, dataset_name)
     with accelerator.main_process_first():
         if os.path.exists(path):
@@ -366,6 +403,9 @@ if __name__ == '__main__':
         
         if args.layers_attr is not None:
             mem_cell_args['layers_attr'] = args.layers_attr
+
+        if args.no_correction:
+            mem_cell_args['correction'] = False
 
         cell = memory_cell_cls(**mem_cell_args, wrap_pos=args.wrap_pos)
         model = recurrent_wrapper_cls(cell, 
