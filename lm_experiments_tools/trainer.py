@@ -312,9 +312,12 @@ class Trainer:
                 with grad_sync_context(self.model):
                     subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
                     # filter items from batch that are not used by model forward
-                    outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args},
+                    if is_train_mode or not self.args.use_generate_on_valid:
+                        outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args},
                                          **self.forward_kwargs)
-                    loss = outputs['loss']
+                        loss = outputs['loss']
+                    else:
+                        outputs = dict(loss=torch.zeros(()))
                     # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                     # no need, accelerate does it internally (need to pass gradient_accumulation_steps to accelerator)
                     # loss = loss / self.args.gradient_accumulation_steps
@@ -426,6 +429,9 @@ class Trainer:
         """
         for k in batch_metrics:
             self.batch_metrics[split][k] += [batch_metrics[k]]
+            cur_metric = accelerate.utils.gather_object(self.batch_metrics[split][k])
+            cur_metric = np.mean(cur_metric)
+            logger.info(f'Current {split} {k}: {cur_metric}')
 
     def _add_metrics_data(self, metrics_data: Dict[str, torch.Tensor], split: str):
         """Adds metrics data to keep. These data would be used to compute metrics later with get_metrics.
@@ -702,7 +708,7 @@ class Trainer:
 
         if not load_only_model_ckpt:
             logger.info('Loading model, trainer, and accelerate state')
-            self.accelerator.load_state(load_path / 'accelerate_state')
+            self.accelerator.load_state(load_path / 'accelerate_state', strict=False)
             if reset_optimizer:
                 raise RuntimeError('Reset optimizer only is not supported. You may load only model weights with'
                                    '--reset_optimizer --reset_lr')
