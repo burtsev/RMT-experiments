@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 export WANDB_PROJECT=babilong
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 NP=4
 # set -e
 cd ../..
@@ -20,12 +20,12 @@ METRIC=exact_match
 MODEL_NAME=gpt2  # backbone model
 SEGMENT_SIZE=512 # size of one segment in tokens
 MEMORY_SIZE=10
-MAX_N_SEGMENTS=2
-D_MEM=16
+MAX_N_SEGMENTS=32
+D_MEM=64
 
-ITERS=5000
-TBS=32
-BS=2
+ITERS=10000
+TBS=64
+BS=1
 
 
 SAMPLE_SIZE=$(($SEGMENT_SIZE*$MAX_N_SEGMENTS)) # length of task sample in tokens
@@ -33,10 +33,10 @@ GRAD_ACC_STEPS=$(($TBS/($BS*$NP)))
 SCHEDULER=linear
 LR=1e-04
 
-for N in 1
+for N in 2
 do
 
-K2=3   # BPTT unroll length
+K2=-1   # BPTT unroll length
 
 ACCEL_CONFIG=./accel_configs/accelerate.yaml
 
@@ -73,6 +73,7 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29701 run_fine
         --early_stopping_patience 15 \
         --seed $(($N+42)) \
         --clip_grad_norm 1.0 \
-        --d_mem $D_MEM
+        --d_mem $D_MEM \
+	--model_cpt /home/jovyan/armt/runs/babilong/qa1_single-supporting-fact/rmt/gpt2/lr1e-04_linear_adamw_wd1e-03_32x512_mem10_bs64_bptt--1/run_1
 done
 echo "done"

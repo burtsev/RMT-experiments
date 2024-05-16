@@ -43,7 +43,6 @@ class MemoryCell(torch.nn.Module):
         return out, state
     
     def generate(self, input_ids, memory_state, attention_mask, **generate_kwargs):
-
         seg_kwargs = self.process_input(input_ids, memory_state, attention_mask=attention_mask)
         out = self.model.generate(
             **seg_kwargs,
@@ -94,14 +93,13 @@ class RecurrentWrapper(torch.nn.Module):
                 attention_mask=None, 
                 output_attentions=None, 
                 output_hidden_states=None,
-                input_segmented=None,
-                sliding_window=None
                 ):
         memory_state = None
         segmented = self.segment(input_ids=input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, labels_mask=labels_mask)
         cell_outputs = []
-        cell_out, memory_state = self.memory_cell(**segmented[0], memory_state=memory_state)
-        cell_outputs.append(cell_out)
+        for segment in segmented:
+            cell_out, memory_state = self.memory_cell(**segment, memory_state=memory_state)
+            cell_outputs.append(cell_out)
 
         out = self.process_outputs(cell_outputs, labels=labels, 
                                    labels_mask=labels_mask,
@@ -114,16 +112,19 @@ class RecurrentWrapper(torch.nn.Module):
         memory_state = None
         segmented = self.segment(input_ids=input_ids, attention_mask=attention_mask)
 
+        for segment in segmented[:-1]:
+            _, memory_state = self.memory_cell(**segment, memory_state=memory_state)
 
-        out = self.memory_cell.generate(**segmented[0], memory_state=memory_state, **generate_kwargs)
-
+        segment = segmented[-1]
+        out = self.memory_cell.generate(**segment, memory_state=memory_state, **generate_kwargs)
         return out
 
     def segment(self, **kwargs):
         segments = []
+        first_seg_len = self.rmt_config['first_seg_len'] if 'first_seg_len' in self.rmt_config else None
         for k, tensor in kwargs.items():
             if tensor is not None:
-                k_segments = [tensor]
+                k_segments = self.split(tensor, first_seg_len)
                 for s, k_seg in enumerate(k_segments):
                     if s < len(segments):
                         segments[s][k] = k_seg
@@ -131,8 +132,12 @@ class RecurrentWrapper(torch.nn.Module):
                         segments.append({k: k_seg})
 
         return segments
-    
-
+    def split(self, tensor, first_seg_len):
+        if first_seg_len is None or tensor.size(1) <= first_seg_len:
+            return [tensor]
+        else:
+            return [tensor[:, :first_seg_len],] + [tensor[:, i:i+1] for i in range(first_seg_len, tensor.size(1))]
+        
     def process_outputs(self, cell_outputs, **kwargs):
         out = CausalLMOutputWithCrossAttentions()
         full_logits = torch.cat([o.logits for o in cell_outputs], dim=1)
@@ -168,13 +173,4 @@ class RecurrentWrapper(torch.nn.Module):
                     out[f'{key}_{seg_num}'] = value
 
         return out 
-        
-    def manage_gradients(self, memory_state, seg_num):
-        k2, max_n_segments = self.rmt_config.get('k2'), self.rmt_config.get('max_n_segments')
-        if seg_num == 0 \
-            or k2 in {-1, None} \
-            or seg_num + k2 > max_n_segments:
-                return True
-        
-        memory_state = memory_state.detach()
-        return False
+    

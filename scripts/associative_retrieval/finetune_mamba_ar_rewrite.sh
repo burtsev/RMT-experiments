@@ -20,18 +20,18 @@ MODEL_NAME=gpt-neox
 TBS=512
 INPUT_SIZE=2048
 
-NUMS_PAIRS=(1 2 3 5 10 20 40 50 50 200)
+NUMS_PAIRS=(1 2 3 5 10 20 40 50)
 # NUMS_PAIRS=(200)
 
-KEY_SIZES=(1 1 1 1 1 2 2 2 3 3)
+KEY_SIZES=(1 1 1 1 1 1 1 1)
 # KEY_SIZES=(3)
 
-VALUE_SIZES=(1 1 1 1 1 1 1 1 1 1)
+VALUE_SIZES=(1 1 1 1 1 1 1 1)
 
-BSS=(128 128 128 128 128 128 64 64 64 16)
+BSS=(128 128 128 128 128 128 64 64)
 # BSS=(16)
 
-ITERSS=(2000 10000 10000 10000 10000 10000 10000 10000 10000 30000)
+ITERSS=(2000 10000 10000 10000 10000 10000 10000 30000)
 # ITERSS=(30000)
 
 # ITERSS=(1 1 1 1 1 1 1 1)
@@ -69,7 +69,7 @@ if [[ j -gt 0 ]]
 then
     PREV_NUM_PAIRS=${NUMS_PAIRS[j-1]}
     PREV_MAX_N_SEGMENTS=$((PREV_NUM_PAIRS + 1))
-    MODEL_CPT=../runs/${TASK_NAME}/mamba/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZES[j-1]}-v${VALUE_SIZES[j-1]}-p${PREV_NUM_PAIRS}-${PREV_MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${PREV_MAX_N_SEGMENTS}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N 
+    MODEL_CPT=../runs/${TASK_NAME}/rewrite/mamba/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZES[j-1]}-v${VALUE_SIZES[j-1]}-p${PREV_NUM_PAIRS}-${PREV_MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${PREV_MAX_N_SEGMENTS}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N 
 else
     MODEL_CPT=None
 fi
@@ -83,7 +83,7 @@ echo RUNNING: TASK_NAME MEMORY_SIZE KEY_SIZE VALUE_SIZE N_SEG  MODEL_NAME MODEL_
 echo RUNNING: $TASK_NAME $MEMORY_SIZE $KEY_SIZE $VALUE_SIZE $MAX_N_SEGMENTS $MODEL_NAME $MODEL_CLS  $LR $N
 accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_finetuning_associative_retrieval.py \
         --task_name $TASK_NAME \
-        --model_path ../runs/${TASK_NAME}/mamba/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZE}-v${VALUE_SIZE}-p${NUM_PAIRS}-${MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${K2}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N \
+        --model_path ../runs/${TASK_NAME}/rewrite/mamba/$MODEL_NAME/lr${LR}_${SCHEDULER}_adamw_wd1e-03_k${KEY_SIZE}-v${VALUE_SIZE}-p${NUM_PAIRS}-${MAX_N_SEGMENTS}x${INPUT_SIZE}_mem${MEMORY_SIZE}_bs${TBS}_${SEGMENT_ORDERING}_bptt-${K2}_${NUM_LAYERS}l${NUM_LAYERS}hd${DIM}/run_$N \
         --model_cls $BACKBONE_CLS \
         --model_type $MODEL_TYPE \
         --memory_cell_cls $MEMORY_CELL \
@@ -114,7 +114,8 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_fine
         --model_cpt $MODEL_CPT \
         --save_best \
         --vary_n_segments \
-        --from_pretrained trash
+        --from_pretrained trash \
+        --rewrite_setting
 done
 done
 done
