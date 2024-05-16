@@ -41,6 +41,7 @@ logger.info(f"CUDA DEVICE COUNT: {torch.cuda.device_count()}")
 from transformers import AutoConfig, AutoTokenizer, HfArgumentParser  # noqa: E402
 
 from lm_experiments_tools.utils import get_cls_by_name, get_optimizer, prepare_run  # noqa: E402
+from baselines.rwkv.RWKV_v5.src.dataflow.trie_tokenizer import MT_TRIE_TOKENIZER
 
 # limit # of CPU threads to be used per pytorch worker, otherwise it might use all cpus and throttle gpus
 # > 2 fails cause of https://github.com/pytorch/pytorch/issues/56615
@@ -96,6 +97,8 @@ parser.add_argument('--segment_size', type=int, default=None, help='maximal inpu
 parser.add_argument('--num_mem_tokens', type=int, default=None, help='number of memory tokens.')
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='randomly sample input size for each batch')
+
+parser.add_argument('--first_seg_len', type=int, default=None, help='parameter for mamba')
 parser.add_argument('--mixed_length_ratio', type=float, default=0.0, help='used for mixed length curriculum. '
                     'r > 0.0 means that we will start to sample batches with lengths <= max_n_segments')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
@@ -112,6 +115,8 @@ parser.add_argument('--desired_metric', type=float, default=1.0, help='metric to
 # tokenizer
 # todo: add wordpiece tokenizers support?
 parser.add_argument('--tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
+
+parser.add_argument('--rwkv_tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
 
 # optimizer args
 parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
@@ -172,9 +177,17 @@ if __name__ == '__main__':
     prepare_run(args, logger, logger_fmt)
 
     if not args.from_pretrained:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        if args.tokenizer is not None:
+            tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        elif args.rwkv_tokenizer  is not None:
+            tokenizer = MT_TRIE_TOKENIZER(args.rwkv_tokenizer)
+            tokenizer.__call__ = lambda text, *y: tokenizer.encode(text)
+            
+        else:
+            raise 'Need tokenizer'
+
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained, trust_remote_code=True, padding_side='left')
 
     # Prepare datasets
     logger.info(f'preparing dataset for {args.task_dataset}')
@@ -237,7 +250,7 @@ if __name__ == '__main__':
     gen_token = tokenizer.encode('GEN')[0]
     eos_token = tokenizer.eos_token_id
 
-    def collate_fn(batch):
+    def collate_fn(batch, valid=False):
         targets = [torch.tensor(b['target_tokens']) for b in batch]
         input_ids = [torch.tensor(b['input_tokens'] + b['question_tokens'] + [gen_token] + b['target_tokens'] + [eos_token]) for b in batch]
         gen_inputs = [torch.tensor(b['input_tokens'] + b['question_tokens'] + [gen_token]) for b in batch]
@@ -246,23 +259,27 @@ if __name__ == '__main__':
         labels_mask = [torch.zeros_like(b, dtype=bool) for b in input_ids]
         for m, t in zip(labels_mask, targets):
             m[-len(t) - 2:] = True
-
+        
         input_ids = pad_sequence(input_ids, padding_value=id_pad_value, batch_first=True)
         gen_inputs = pad_sequence(gen_inputs, padding_value=id_pad_value, batch_first=True)
         attention_mask = pad_sequence(attention_mask, padding_value=0, batch_first=True)
         labels_mask = pad_sequence(labels_mask, padding_value=0, batch_first=True)
+        
+        gen_attn_mask = (gen_inputs != id_pad_value)
 
         collated = {}
         collated['input_ids'] = collated['labels'] = input_ids
         collated['input_ids_generate'] = gen_inputs
         collated['labels_mask'] = labels_mask
         collated['attention_mask'] = attention_mask.bool()
-        collated['attention_mask_generate'] = (gen_inputs != id_pad_value).bool()
+        collated['attention_mask_generate'] = gen_attn_mask.bool()
         collated['target_text'] = [b['answer'] for b in batch]
         return collated
 
     # train_dataset, valid_dataset, test_dataset = dataset["train"], dataset["validation"], dataset["test"]
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers, 'collate_fn': collate_fn}
+
+    kwargs_valid = {'pin_memory': True, 'num_workers': args.data_n_workers, 'collate_fn': lambda x: collate_fn(x, valid=True)}
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
     train_sampler = DistributedSampler(train_dataset, rank=accelerator.process_index,
                                        num_replicas=accelerator.num_processes, shuffle=True, drop_last=True,
@@ -271,7 +288,7 @@ if __name__ == '__main__':
                                       num_replicas=accelerator.num_processes, drop_last=False, shuffle=False)
     train_dataloader = DataLoader(batch_size=per_worker_batch_size, dataset=train_dataset, sampler=train_sampler,
                                   **kwargs)
-    test_dataloader = DataLoader(batch_size=1, dataset=test_dataset, sampler=test_sampler, **kwargs)
+    test_dataloader = DataLoader(batch_size=1, dataset=test_dataset, sampler=test_sampler, **kwargs_valid)
 
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
@@ -292,7 +309,7 @@ if __name__ == '__main__':
         model = model_cls(config=model_cfg)
 
         logger.info(f'Loading pretrained model: {args.from_pretrained}')
-        base_model = model_cls.from_pretrained(args.from_pretrained, use_safetensors=False)
+        base_model = model_cls.from_pretrained(args.from_pretrained)
 
         model.load_state_dict(base_model.state_dict())
         del base_model
@@ -304,7 +321,7 @@ if __name__ == '__main__':
             model = model_cls(config=model_cfg)
         else:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-            model = model_cls.from_pretrained(args.from_pretrained, use_safetensors=False)
+            model = model_cls.from_pretrained(args.from_pretrained)
 
     if args.use_lora:
         peft_config = LoraConfig(
@@ -353,20 +370,31 @@ if __name__ == '__main__':
         max_n_segments = args.max_n_segments
         if max_n_segments in {-1, None}:
             max_n_segments = np.ceil(args.sample_size / args.segment_size)
-        model = recurrent_wrapper_cls(cell, 
-                                      segment_size=args.segment_size,
-                                      max_n_segments=max_n_segments, 
-                                      segment_alignment=args.segment_alignment,
-                                      k2=args.k2,
+
+        rec_wrap_args = dict(
+            segment_size=args.segment_size,
+            max_n_segments=max_n_segments, 
+            segment_alignment=args.segment_alignment,
+            k2=args.k2,
+            first_seg_len=args.first_seg_len
         )
+        model = recurrent_wrapper_cls(cell, **rec_wrap_args)
                                     
 
         ## load cpt of rmt
         if args.model_cpt and args.model_cpt != 'None':
-            model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
-            cpt = torch.load(model_cpt, map_location='cpu')
-            model.load_state_dict(cpt)
-            logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
+            if 'mamba' not in args.model_cpt:
+                model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
+                cpt = torch.load(model_cpt, map_location='cpu')
+                model.load_state_dict(cpt)
+                logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
+            else:
+                import safetensors
+                model_cpt = os.path.join(args.model_cpt, "model_best/model.safetensors")
+                cpt = safetensors.torch.load_file(model_cpt)
+                w = model.load_state_dict(cpt, strict=False)
+                model.memory_cell.model.tie_weights()
+                logger.info(f'loaded mamba with mis w {w}')
 
     if args.freeze_model_weights:
         for n, p in model.named_parameters():
@@ -417,8 +445,11 @@ if __name__ == '__main__':
             generation_outputs = tokenizer.batch_decode([d for d in output['generation_outputs']], add_special_tokens=False)
             for i, o in enumerate(generation_outputs):
                 if '<|endoftext|>' in o:
+                    logger.info(f'generated: {o}')
                     # print(f"gt: {data['target_text'][i]}, generated {o}")
-                    generation_outputs[i] = o.split('<|endoftext|>')[1].strip()
+                    generation_outputs[i] = o.split('<|endoftext|>')[0].strip()
+                    if 'GEN' in generation_outputs[i]:
+                        generation_outputs[i] = generation_outputs[i].split('GEN')[1]
             metrics['exact_match'] = np.mean([text == pred for text, pred in zip (batch['target_text'], generation_outputs)])
         return metrics
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -445,8 +476,16 @@ if __name__ == '__main__':
             for i, o in enumerate(generation_outputs):
                 if '<|endoftext|>' in o:
                     # print(f"gt: {data['target_text'][i]}, generated {o}")
-                    generation_outputs[i] = o.split('<|endoftext|>')[1].strip()
+                    generation_outputs[i] = o.split('<|endoftext|>')[0].strip()
+                    if 'GEN' in generation_outputs[i]:
+                        generation_outputs[i] = generation_outputs[i].split('GEN')[1]
             metrics['exact_match'] = np.mean([text == pred for text, pred in zip (data['target_text'], generation_outputs)])
+
+            if args.show_valid_examples > 0:
+                for i in range(min(args.show_valid_examples, len(generation_outputs))):
+                    logger.info(f"y_text: {data['target_text'][i]}")
+                    logger.info(f"p_text: {generation_outputs[i]}")
+                    logger.info('-' * 50)
 
         elif 'predictions' in data:
             y, p = data['labels'], data['predictions']
