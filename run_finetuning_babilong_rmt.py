@@ -23,6 +23,8 @@ from torch.utils.data.distributed import DistributedSampler
 from peft import get_peft_model, LoraConfig, TaskType
 # load_dotenv()
 from babilong_utils import TaskDataset, SentenceSampler, NoiseInjectionDataset
+from baselines.rwkv.RWKV_v5.src.dataflow.trie_tokenizer import MT_TRIE_TOKENIZER
+
 
 logger_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(format=logger_fmt, level=logging.INFO)
@@ -83,6 +85,7 @@ parser.add_argument('--model_cpt', type=str, default=None, help='pretrained mode
 parser.add_argument('--model_type', type=str, default='encoder-decoder',
                     help='model type, encoder, encoder-decoder, decoder, affects preprocessing '
                          '(default: encoder-decoder)')
+parser.add_argument('--model_suffix', type=str, default='', help='pretrained model suffix after pytorch_model and before .bin')
 
 # Babilong parameters
 parser.add_argument('--sample_size', type=int, default=None, help='max number of tokens in sample')
@@ -182,12 +185,11 @@ if __name__ == '__main__':
         elif args.rwkv_tokenizer  is not None:
             tokenizer = MT_TRIE_TOKENIZER(args.rwkv_tokenizer)
             tokenizer.__call__ = lambda text, *y: tokenizer.encode(text)
-            
         else:
             raise 'Need tokenizer'
-
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained, trust_remote_code=True, padding_side='left')
+
 
     # Prepare datasets
     logger.info(f'preparing dataset for {args.task_dataset}')
@@ -383,6 +385,7 @@ if __name__ == '__main__':
 
         ## load cpt of rmt
         if args.model_cpt and args.model_cpt != 'None':
+<<<<<<< Updated upstream
             if 'mamba' not in args.model_cpt:
                 model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
                 cpt = torch.load(model_cpt, map_location='cpu')
@@ -395,6 +398,14 @@ if __name__ == '__main__':
                 w = model.load_state_dict(cpt, strict=False)
                 model.memory_cell.model.tie_weights()
                 logger.info(f'loaded mamba with mis w {w}')
+=======
+            model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model"+args.model_suffix+".bin")
+            cpt = torch.load(model_cpt, map_location='cpu')
+            model.load_state_dict(cpt)
+            logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
+            logger.info(f'model suffix \"{args.model_suffix}\"')
+            
+>>>>>>> Stashed changes
 
     if args.freeze_model_weights:
         for n, p in model.named_parameters():
@@ -444,12 +455,16 @@ if __name__ == '__main__':
         if 'generation_outputs' in output:
             generation_outputs = tokenizer.batch_decode([d for d in output['generation_outputs']], add_special_tokens=False)
             for i, o in enumerate(generation_outputs):
+                logger.info(f'generated: {o}')
                 if '<|endoftext|>' in o:
                     logger.info(f'generated: {o}')
                     # print(f"gt: {data['target_text'][i]}, generated {o}")
                     generation_outputs[i] = o.split('<|endoftext|>')[0].strip()
+<<<<<<< Updated upstream
                     if 'GEN' in generation_outputs[i]:
                         generation_outputs[i] = generation_outputs[i].split('GEN')[1]
+=======
+>>>>>>> Stashed changes
             metrics['exact_match'] = np.mean([text == pred for text, pred in zip (batch['target_text'], generation_outputs)])
         return metrics
     # HF datasets can compute metrics on each gpu process and then aggregate them on process with rank 0
@@ -477,8 +492,11 @@ if __name__ == '__main__':
                 if '<|endoftext|>' in o:
                     # print(f"gt: {data['target_text'][i]}, generated {o}")
                     generation_outputs[i] = o.split('<|endoftext|>')[0].strip()
+<<<<<<< Updated upstream
                     if 'GEN' in generation_outputs[i]:
                         generation_outputs[i] = generation_outputs[i].split('GEN')[1]
+=======
+>>>>>>> Stashed changes
             metrics['exact_match'] = np.mean([text == pred for text, pred in zip (data['target_text'], generation_outputs)])
 
             if args.show_valid_examples > 0:

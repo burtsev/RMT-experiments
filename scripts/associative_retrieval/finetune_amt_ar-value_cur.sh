@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 export WANDB_PROJECT=associative_retrieval
-export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 NP=4
 cd ../..
 
@@ -21,13 +21,21 @@ MEMORY_SIZE=4
 
 TBS=512
 INPUT_SIZE=2048
-D_MEM=32
+D_MEM=64
 
-NUMS_PAIRS=(1 2 3 5 10 20 40 50)
-KEY_SIZES=(1 1 1 1 1 2 2 2)
-VALUE_SIZES=(1 1 1 1 1 1 1 1)
-BSS=(128 128 128 128 128 128 64 64)
-ITERSS=(2000 10000 10000 10000 10000 10000 10000 30000)
+NUMS_PAIRS=(1 2 3 5 10 20 40 50 50 200)
+# NUMS_PAIRS=(200)
+
+KEY_SIZES=(1 1 1 1 1 2 2 2 3 3)
+# KEY_SIZES=(3)
+
+VALUE_SIZES=(1 1 1 1 1 1 1 1 1 1)
+
+BSS=(128 128 128 128 128 64 32 32 32 8)
+# BSS=(16)
+
+ITERSS=(2000 10000 10000 10000 10000 10000 10000 10000 10000 15000)
+# ITERSS=(30000)
 
 # ITERSS=(1 1 1 1 1 1 1 1)
 
@@ -35,10 +43,10 @@ DIM=128
 NUM_LAYERS=4
 
 
-for N in 1
+for N in 11
 do
 
-for (( j=0; j<${#NUMS_PAIRS[@]}; j++ ))
+for (( j=9; j<${#NUMS_PAIRS[@]}; j++ ))
 do
 NUM_PAIRS=${NUMS_PAIRS[j]}
 KEY_SIZE=${KEY_SIZES[j]}
@@ -103,10 +111,10 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_fine
         --optimizer AdamW  --weight_decay 0.001 \
         --lr ${LR} --lr_scheduler $SCHEDULER --num_warmup_steps $(($ITERS/10)) \
         --data_n_workers 2 \
-        --log_interval 100 --valid_interval 500 \
+        --log_interval 50 --valid_interval 250 \
         --optimize_metric $METRIC --optimize_mode max \
         --show_valid_examples 5 \
-        --early_stopping_patience 50 \
+        --early_stopping_patience 30 \
         --seed $(($N+42)) \
         --clip_grad_value 1.0 \
         --dataset_path /home/rodkin/rmt/datasets/associative_retrieval \
@@ -116,7 +124,8 @@ accelerate launch --config_file $ACCEL_CONFIG --main_process_port 29571 run_fine
         --valid_size 1000 \
         --test_size 10000 \
         --model_cpt $MODEL_CPT \
-        --save_best
+        --save_best \
+        --vary_n_segments
 done
 done
 done

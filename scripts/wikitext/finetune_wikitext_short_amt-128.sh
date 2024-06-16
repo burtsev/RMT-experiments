@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_VISIBLE_DEVICES=3,4,5,6
 NP=4 # ./test_bert_sparse_pretrain_train_valid.sh
 set -e
 cd ../..
@@ -10,27 +10,28 @@ CUDA_LAUNCH_BLOCKING=1
 MODEL_TYPE=decoder
 MEMORY_CELL=modeling_amt.language_modeling:AssociativeMemoryCell
 RECURRENT_WRAPPER=modeling_amt.language_modeling:AssociativeRecurrentWrapper
-DISTILLATOR=modeling_rmt.language_modeling:Distillator
 BACKBONE_CLS=transformers:AutoModelForCausalLM
 TEACHER_CLS=transformers:AutoModelForCausalLM
-TASK_NAME=wikitext-2-v1
+TASK_NAME=wikitext-103-v1
 
-ITERS=1
+ITERS=36000
 TBS=32
 
-ALPHAS=(1 1 1 1 1)
-MAX_N_SEGMENTSS=(2 3 4 5 8)
-MAX_VAL_SEGMENTSS=(15 15 15 15 15)
-MEMORY_SIZES=(4 4 4 4 4)
+ALPHAS=(1)
+MAX_N_SEGMENTSS=(8)
+MAX_VAL_SEGMENTSS=(15)
+MEMORY_SIZES=(16)
 INPUT_TOKENS=128
-LRS=(1e-4 5e-5 3e-5 2e-5 1e-5)
-MODEL=irodkin/gpt2-wiki2
-D_MEM=4
+LRS=(1e-4)
+MODEL=irodkin/gpt2-wiki103
+BSS=(1)
+
+TEACHER=irodkin/gpt2-wiki103
+D_MEM=96
 
 
-BSS=(2 2 1 1 1)
 
-for N in 1
+for N in 2
 do
 
 for MODEL_NAME in $MODEL
@@ -77,7 +78,6 @@ accelerate launch --num_processes $NP --config_file  ./accelerate.yaml --main_pr
         --model_type $MODEL_TYPE \
         --memory_cell_cls $MEMORY_CELL \
         --recurrent_wrapper_cls $RECURRENT_WRAPPER \
-        --distillator_cls $DISTILLATOR \
         --model_cls $BACKBONE_CLS \
         --model_cpt $MODEL_CPT \
         --input_seq_len $INPUT_SEQ_LEN \
@@ -100,9 +100,6 @@ accelerate launch --num_processes $NP --config_file  ./accelerate.yaml --main_pr
         --early_stopping_patience 15 \
         --seed $(($N+42*$j)) \
         --clip_grad_value 5.0 \
-        --alpha_distil $ALPHA \
-        --pretrained_teacher 'irodkin/gpt2-wiki2' \
-        --teacher_cls $TEACHER_CLS \
         --save_best \
         --tokenizer 'gpt2' \
         --d_mem $D_MEM

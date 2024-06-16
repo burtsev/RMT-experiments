@@ -196,4 +196,11 @@ class MT_TRIE_TOKENIZER():
 
         # Decode and return
         return self.trie_tokenizer.decode(clean_tokens)
-        
+
+    def __call__(self, *args, **kwds):
+        if isinstance(args[0], list):
+            return [self.__call__(i, *args[1:], **kwds) for i in args[0]]
+        return self.encode(*args)
+    
+    def batch_decode(self, list_of_tokens, **kwargs):
+        return [self.decode(tokens) for tokens in list_of_tokens]

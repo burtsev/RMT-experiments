@@ -13,7 +13,7 @@ MODEL_TYPE=decoder
 MEMORY_CELL=modeling_amt.language_modeling:AssociativeMemoryCell
 RECURRENT_WRAPPER=modeling_amt.language_modeling:AssociativeRecurrentWrapper
 BACKBONE_CLS=transformers:AutoModelForCausalLM
-TASK_DATASET=qa1_single-supporting-fact
+TASK_DATASET=qa2_two-supporting-facts
 NOISE_DATASET=pg19
 METRIC=exact_match
 

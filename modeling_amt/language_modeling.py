@@ -3,6 +3,7 @@ import torch
 from torch.nn import CrossEntropyLoss
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from torch.nn.functional import relu as r
+import wandb
 
 def dpfp(x, nu=1):
   x = torch.cat([r(x), r(-x)], dim=-1)
@@ -24,9 +25,10 @@ class DPFP:
 
 class AssociativeLayerWrapper(torch.nn.Module):
 
-    def __init__(self, layer, d_model, num_mem_tokens, d_mem) -> None:
+    def __init__(self, layer, d_model, num_mem_tokens, d_mem, correction=True, info=None) -> None:
         super().__init__()
-        # self.seg_num = 0
+        self.info = info
+        self.seg_num = 0
         self.d_model = d_model
         self.num_mem_tokens = num_mem_tokens
         self.d_mem = d_mem
@@ -57,6 +59,7 @@ class AssociativeLayerWrapper(torch.nn.Module):
         
         self.generate_mode = False
         self.first_seg = True
+        self.correction = correction
 
     def associate(self, hidden_states):
 
@@ -99,11 +102,16 @@ class AssociativeLayerWrapper(torch.nn.Module):
             num = torch.einsum('ijk,ikt->ijt', mk, self.W_mem)
             denom = torch.einsum("ij,ikj->ik", self.z, mk)[..., None] + 1e-5
             prev_mv = num / denom
-            new_info_coef = 1 - denom / (torch.linalg.norm(mk, dim=-1) ** 2 + 1e-5)[..., None]
-            new_info_coef = torch.clip(new_info_coef, 0, 1)
+            if self.correction:
+                new_info_coef = 1 - denom / (torch.linalg.norm(mk, dim=-1) ** 2 + 1e-5)[..., None]
+                new_info_coef = torch.clip(new_info_coef, 0, 1).detach()
+            else:
+                new_info_coef = 1
         else: 
             prev_mv = torch.zeros_like(new_mv, device=new_mv.device)
             new_info_coef = 1
+        
+        # wandb.log({f"gamma_{self.info['layer']}": new_info_coef.mean(dim=1).item() if isinstance(new_info_coef, torch.Tensor) else 1}, step=self.seg_num)
         mv = new_mv - prev_mv
 
         # new_norm = torch.linalg.norm(new_mv, dim=-1)
@@ -115,18 +123,22 @@ class AssociativeLayerWrapper(torch.nn.Module):
 
         associations =  torch.einsum('ijk,ijt,ij->ikt', mk, mv, mb) # (bsz, d_mem, d_model)
         self.W_mem = self.W_mem + associations
+
         self.z = self.z + (new_info_coef*mk).sum(dim=1)
+        # self.z = self.z + (new_info_coef*mb[..., None]*mk).sum(dim=1)
+        self.seg_num += 1
 
 
     def zero_mem(self):
         self.first_seg = True
         self.W_mem = torch.zeros(1, self.d_key, self.d_model)
         self.z = torch.zeros(1, self.d_key)
+        self.seg_num = 0
 
 
 
 class AssociativeMemoryCell(torch.nn.Module):
-    def __init__(self, base_model, num_mem_tokens, d_mem, layers_attr: str = 'transformer.h', wrap_pos=True):
+    def __init__(self, base_model, num_mem_tokens, d_mem, layers_attr: str = 'transformer.h', wrap_pos=True, correction=True):
         super().__init__()
         self.model = base_model
         self.num_mem_tokens = num_mem_tokens
@@ -141,7 +153,14 @@ class AssociativeMemoryCell(torch.nn.Module):
             self.layers = getattr(self.layers, attr)
         
         for i in range(len(self.layers)):
-            self.layers[i] = AssociativeLayerWrapper(self.layers[i], self.d_model, self.num_mem_tokens, self.d_mem)
+            self.layers[i] = AssociativeLayerWrapper(
+                self.layers[i], 
+                self.d_model, 
+                self.num_mem_tokens, 
+                self.d_mem, 
+                correction,
+                info={'layer': i}
+            )
         self.create_memory(num_mem_tokens)
         self.wrap_pos = wrap_pos
         if wrap_pos:

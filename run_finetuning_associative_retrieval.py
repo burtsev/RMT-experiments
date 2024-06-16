@@ -87,6 +87,7 @@ parser.add_argument('--model_type', type=str, default='encoder-decoder',
 parser.add_argument('--key_size', type=int, default=None, help='number of digits in keys')
 parser.add_argument('--value_size', type=int, default=None, help='number of digits in values')
 parser.add_argument('--num_pairs', type=int, default=None, help='number of key-value pairs in sample')
+parser.add_argument('--num_test_pairs', type=int, default=None, help='number of key-value pairs in test sample')
 parser.add_argument('--dataset_path', type=str, default="/home/jovyan/rmt/datasets/associative_retrieval/", help="path to saved datasets")
 parser.add_argument('--train_size', type=int, default=10000, help='number of samples in train split')
 parser.add_argument('--valid_size', type=int, default=1000, help='number of samples in validation split')
@@ -218,6 +219,8 @@ class ARDataset:
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    if args.num_test_pairs is None:
+        args.num_test_pairs = args.num_pairs
     # set current working dir
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
     os.chdir(args.working_dir)
@@ -257,13 +260,13 @@ if __name__ == '__main__':
         block_size = args.segment_size
         sep_token, gen_token, eos_token = 100, 101, 102
 
-        def collate_fn(batch):
+        def collate_fn(batch, valid=False):
             keys = [b['keys'] for b in batch]
             values = [b['values'] for b in batch]
             
             if not args.vary_n_segments:
                 tgt_inds = [b['target_key_ind'].item() for b in batch]
-                n = args.num_pairs
+                n = len(keys[0])
             else:
                 n = torch.randint(1, len(keys[0])+1, size=())
                 keys = [x[-n:] for x in keys]
@@ -328,11 +331,16 @@ if __name__ == '__main__':
     # get train dataset
     logger.info(f'preparing dataset for: {args.task_name}')
     
-    dataset_name = f"AR_k{args.key_size}_v{args.value_size}_p{args.num_pairs}"
+    dataset_name = f"AR_k{args.key_size}_v{args.value_size}_p{args.num_pairs}_valp{args.num_test_pairs}"
+    
     if rewrite_setting:
         dataset_name += '_rewrite'
     if args.vary_n_segments:
         dataset_name += '_rnd'
+    if args.validate_only:
+        dataset_name += '_for_testing'
+    else:
+        dataset_name += '_for_training'
     path = os.path.join(args.dataset_path, dataset_name)
     with accelerator.main_process_first():
         if os.path.exists(path):
@@ -343,8 +351,8 @@ if __name__ == '__main__':
         else:
             os.system(f"mkdir {path}")
             train_dataset = ARDataset(args.key_size, args.value_size, sample_len=args.num_pairs, num_samples=args.train_size)
-            valid_dataset = ARDataset(args.key_size, args.value_size, sample_len=args.num_pairs, num_samples=args.valid_size)
-            test_dataset = ARDataset(args.key_size, args.value_size, sample_len=args.num_pairs, num_samples=args.test_size)
+            valid_dataset = ARDataset(args.key_size, args.value_size, sample_len=args.num_test_pairs, num_samples=args.valid_size)
+            test_dataset = ARDataset(args.key_size, args.value_size, sample_len=args.num_test_pairs, num_samples=args.test_size)
 
             torch.save(train_dataset, os.path.join(path, 'train'))
             torch.save(valid_dataset, os.path.join(path, 'valid'))
@@ -383,11 +391,11 @@ if __name__ == '__main__':
     if args.backbone_cpt:
         backbone_cpt = os.path.join(args.backbone_cpt, "model_best.pth")
         cpt = torch.load(backbone_cpt, map_location='cpu')
-        model.load_state_dict(cpt['model_state_dict'], strict=False)
+        model.load_state_dict(cpt['model_state_dict'])
         logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
 
     # Pass memory settings to pretrained model
-    if args.num_mem_tokens is not None:
+    if True:
         
         memory_cell_cls = get_cls_by_name(args.memory_cell_cls)
         recurrent_wrapper_cls = get_cls_by_name(args.recurrent_wrapper_cls)
@@ -396,18 +404,20 @@ if __name__ == '__main__':
         
         mem_cell_args = dict(
             base_model=model,
-            num_mem_tokens=args.num_mem_tokens,
         )
         if args.d_mem is not None:
             mem_cell_args['d_mem'] = args.d_mem
-        
+
+        if args.num_mem_tokens is not None:
+            mem_cell_args['num_mem_tokens'] = args.num_mem_tokens
+            mem_cell_args['wrap_pos'] = args.wrap_pos
         if args.layers_attr is not None:
             mem_cell_args['layers_attr'] = args.layers_attr
 
         if args.no_correction:
             mem_cell_args['correction'] = False
 
-        cell = memory_cell_cls(**mem_cell_args, wrap_pos=args.wrap_pos)
+        cell = memory_cell_cls(**mem_cell_args)
         model = recurrent_wrapper_cls(cell, 
                                       segment_size=block_size,
                                       max_n_segments=args.max_n_segments, 
@@ -421,7 +431,7 @@ if __name__ == '__main__':
         if args.model_cpt and args.model_cpt != 'None':
             model_cpt = os.path.join(args.model_cpt, "model_best/pytorch_model.bin")
             cpt = torch.load(model_cpt, map_location='cpu')
-            model.load_state_dict(cpt, strict=False)
+            model.load_state_dict(cpt)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
     if args.freeze_model_weights:
@@ -553,8 +563,10 @@ if __name__ == '__main__':
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       ###booydar
                       batch_metrics_fn=batch_metrics_fn,
-                    #   generate_kwargs={'max_new_tokens': int(args.value_size * 2)}
-                      generate_kwargs={'pad_token_id': 102},
+                      generate_kwargs={
+                          'max_new_tokens': int(args.value_size * 2),
+                          'pad_token_id': 102
+                      },
                       stop_metric_condition=lambda m: m >= args.desired_metric
                       )
 
@@ -578,11 +590,13 @@ if __name__ == '__main__':
         trainer.save_metrics(save_path=args.model_path)
     else:
         # run validation, do not write to tensorboard
-        logger.info('Running validation on train set:')
-        trainer.validate(train_dataloader, split='train', write_tb=True)
+        # logger.info('Running validation on train set:')
+        # trainer.validate(train_dataloader, split='train', write_tb=True)
         if valid_dataloader is not None:
             logger.info('Running validation on valid data:')
             trainer.validate(valid_dataloader, write_tb=True, split='valid')
+        else:
+            raise "No valid dataset"
         # if test_dataloader is not None:
         #     logger.info('Runnning validation on test data:')
         #     trainer.validate(test_dataloader, write_tb=True, split='test')

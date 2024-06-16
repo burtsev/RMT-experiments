@@ -41,6 +41,7 @@ DESIRED_METRICS=(1.0 1.0 1.0 1.0 1.0 1.0 1.0)
 START_CPT=None
 
 for (( j=6; j<${#MAX_N_SEGMENTSS[@]}; j++ ))
+
 do
 
 BS=${BSS[j]}

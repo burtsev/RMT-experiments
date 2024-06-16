@@ -15,19 +15,19 @@ BACKBONE_CLS=transformers:AutoModelForCausalLM
 TEACHER_CLS=transformers:AutoModelForCausalLM
 TASK_NAME=wikitext-2-v1
 
-ITERS=6000
+ITERS=10000
 TBS=32
 
 ALPHAS=(1 1 1 1 1)
-MAX_N_SEGMENTSS=(2 3 4 5 8)
+MAX_N_SEGMENTSS=(3 4 5 8)
 MAX_VAL_SEGMENTSS=(15 15 15 15 15)
-MEMORY_SIZES=(4 4 4 4 4)
+MEMORY_SIZES=(4 4 4 4)
 INPUT_TOKENS=128
-LRS=(1e-4 5e-5 3e-5 2e-5 1e-5)
-MODEL=gpt2
+LRS=(1e-4 1e-4 1e-4 1e-4)
+MODEL=irodkin/gpt2-wiki2
 
 
-BSS=(2 2 1 1 1)
+BSS=(2 2 1 1)
 
 for N in 1
 do

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 export WANDB_PROJECT=associative_retrieval
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=1,3,4,5
 NP=4
 # set -e
 cd ../..

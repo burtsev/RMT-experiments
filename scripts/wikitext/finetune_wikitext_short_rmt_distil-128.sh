@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 NP=4 # ./test_bert_sparse_pretrain_train_valid.sh
 set -e
 cd ../..
@@ -13,21 +13,21 @@ RECURRENT_WRAPPER=modeling_rmt.language_modeling:RecurrentWrapper
 DISTILLATOR=modeling_rmt.language_modeling:Distillator
 BACKBONE_CLS=transformers:AutoModelForCausalLM
 TEACHER_CLS=transformers:AutoModelForCausalLM
-TASK_NAME=wikitext-2-v1
+TASK_NAME=wikitext-103-v1
 
 
-ITERS=6000
+ITERS=30000
 TBS=32
 
-ALPHAS=(1 1 1 1 1)
-MAX_N_SEGMENTSS=(2 3 4 5 8)
-MAX_VAL_SEGMENTSS=(15 15 15 15 15)
-MEMORY_SIZES=(4 4 4 4 4)
+ALPHAS=(0)
+MAX_N_SEGMENTSS=(8)
+MAX_VAL_SEGMENTSS=(16)
+MEMORY_SIZES=(16)
 INPUT_TOKENS=128
-LRS=(1e-4 5e-5 3e-5 2e-5 1e-5)
-MODEL=gpt2
+LRS=(1e-4)
+MODEL=irodkin/gpt2-wiki103
 
-BSS=(2 2 1 1 1)
+BSS=(1)
 
 for N in 1
 do
@@ -100,10 +100,9 @@ accelerate launch --num_processes $NP --config_file  ./accelerate.yaml --main_pr
         --seed $(($N+42*$j)) \
         --clip_grad_value 5.0 \
         --alpha_distil $ALPHA \
-        --pretrained_teacher 'irodkin/gpt2-wiki2' \
+        --pretrained_teacher 'irodkin/gpt2-wiki103' \
         --teacher_cls $TEACHER_CLS \
-        --save_best \
-        --tokenizer 'gpt2'
+        --save_best
 done
 done
 done

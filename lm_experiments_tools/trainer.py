@@ -345,7 +345,7 @@ class Trainer:
                     for k in metrics:
                         metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
                         if isinstance(metrics[k], torch.Tensor):
-                            metrics[k] = metrics[k].detach().item()
+                            metrics[k] = metrics[k].detach().cpu().item()
                         batch_metrics[k] += metrics[k]
 
                     if self.keep_for_metrics_fn and self.metrics_fn:
@@ -478,11 +478,13 @@ class Trainer:
         # collect metrics names from all processes: it is possible that different workers might have different
         # set of metrics (e.g., some metric could be not available for some batches).
         metrics_keys = set(accelerate.utils.gather_object(list(self.batch_metrics[split].keys())))
+
         if metrics_keys != self.batch_metrics[split].keys():
             missing_metrics_keys = metrics_keys - self.batch_metrics[split].keys()
             logger.warning(f'some of the batch-lvl metrics on rank_{self.accelerator.process_index} are missing, '
                            f'but were found on another ranks: {missing_metrics_keys}')
         metrics_keys = sorted(metrics_keys)
+
         for k in metrics_keys:
             metrics[k] = accelerate.utils.gather_object(self.batch_metrics[split][k])
             metrics[k] = np.mean(metrics[k])
@@ -497,6 +499,7 @@ class Trainer:
                                f'but was found on another ranks: {missing_data_keys}')
             data_keys = sorted(data_keys)
             for k in data_keys:
+                # print(k, self.metrics_data[split][k][0].device if isinstance(self.metrics_data[split][k][0], torch.Tensor) else type(self.metrics_data[split][k][0]))
                 metrics_data[k] = accelerate.utils.gather_object(self.metrics_data[split][k])
                 m_shape = getattr(metrics_data[k][0], 'shape', None)
                 if m_shape is None:

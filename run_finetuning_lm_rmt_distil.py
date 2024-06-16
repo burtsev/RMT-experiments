@@ -19,6 +19,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 import accelerate
 
+from baselines.rwkv.RWKV_v5.src.dataflow.trie_tokenizer import MT_TRIE_TOKENIZER
 # load_dotenv()
 
 logger_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -48,6 +49,8 @@ from lm_experiments_tools.utils import get_cls_by_name, get_optimizer, prepare_r
 # torch.cuda.set_device(hvd.local_rank())
 
 parser = HfArgumentParser(TrainerArgs)
+
+parser.add_argument('--rwkv_tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
 parser.add_argument('--task_name', type=str, help="Task name, wikitext, ...")
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
@@ -172,7 +175,17 @@ if __name__ == '__main__':
 
     prepare_run(args, logger, logger_fmt)
     if args.tokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+
+        if args.tokenizer == 'RWKV/HF_v5-Eagle-7B':
+            tokenizer.unk_token = '<unk>'
+            tokenizer.unk_token_id = 65535
+    elif args.rwkv_tokenizer is not None:
+        tokenizer = MT_TRIE_TOKENIZER(args.rwkv_tokenizer)
+        tokenizer.__call__ = lambda text, *y: tokenizer.encode(text)
+        tokenizer.unk_token = '<unk>'
+        tokenizer.unk_token_id = 65535
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
 
@@ -337,7 +350,7 @@ if __name__ == '__main__':
 
     # get validation dataset
     valid_dataloader = None
-    logger.info('preparing validation data from babilong')
+    logger.info(f'preparing validation data from {args.task_name}')
     valid_dataloader = alignedDataLoader(valid_dataset, batch_size=per_worker_batch_size,
                                          collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
@@ -349,13 +362,15 @@ if __name__ == '__main__':
 
         test_dataloader = alignedDataLoader(test_dataset, batch_size=per_worker_batch_size,
                                             collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
+        
 
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
 
     # define model
-    model_cls = get_cls_by_name(args.model_cls)
 
+    logger.info('starting with test')
+    model_cls = get_cls_by_name(args.model_cls)
     logger.info(f'Using model class: {model_cls}')
 
     if args.use_adapter:
@@ -382,7 +397,7 @@ if __name__ == '__main__':
             model = model_cls(config=model_cfg)
         else:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-            model = model_cls.from_pretrained(args.from_pretrained, use_safetensors=False)
+            model = model_cls.from_pretrained(args.from_pretrained)
 
     if args.use_lora:
         peft_config = LoraConfig(
@@ -405,20 +420,23 @@ if __name__ == '__main__':
         logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
 
     # Pass memory settings to pretrained model
-    if args.num_mem_tokens is not None:
+    if True:
         memory_cell_cls = get_cls_by_name(args.memory_cell_cls)
         recurrent_wrapper_cls = get_cls_by_name(args.recurrent_wrapper_cls)
-        distillator = get_cls_by_name(args.distillator_cls)
+        if args.distillator_cls is not None:
+            distillator = get_cls_by_name(args.distillator_cls)
 
         logger.info(f'Wrapping in: {memory_cell_cls} and {recurrent_wrapper_cls}')
         
         
         mem_cell_args = dict(
             base_model=model,
-            num_mem_tokens=args.num_mem_tokens,
         )
         if args.d_mem is not None:
             mem_cell_args['d_mem'] = args.d_mem
+        
+        if args.num_mem_tokens is not None:
+            mem_cell_args['num_mem_tokens'] = args.num_mem_tokens
 
         cell = memory_cell_cls(**mem_cell_args)
         model = recurrent_wrapper_cls(cell, 
@@ -427,9 +445,11 @@ if __name__ == '__main__':
                                       vary_n_segments=args.vary_n_segments,
                                       k2=args.k2,
         )
-        teacher_cls = get_cls_by_name(args.teacher_cls)
-        teacher = teacher_cls.from_pretrained(args.pretrained_teacher)
-        model = distillator(teacher, model, alpha_distil=args.alpha_distil)             
+
+        if args.distillator_cls is not None:
+            teacher_cls = get_cls_by_name(args.teacher_cls)
+            teacher = teacher_cls.from_pretrained(args.pretrained_teacher)
+            model = distillator(teacher, model, alpha_distil=args.alpha_distil)             
 
         ## load cpt of rmt
         if args.model_cpt and args.model_cpt != 'None':
