@@ -328,7 +328,9 @@ if __name__ == '__main__':
             return collated
 
     with accelerator.main_process_first():
-        train_dataset = Dataset.from_dict(group_texts(tokenized_datasets['train'].to_dict(), block_size, history_size))
+        # train_dataset = Dataset.from_dict(group_texts(tokenized_datasets['train'].to_dict(), block_size, history_size))
+        train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
+                                                        batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
         valid_dataset = Dataset.from_dict(group_texts(tokenized_datasets['validation'].to_dict(), block_size, val_history_size))
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     # shuffle train data each epoch (one loop over train_dataset)
