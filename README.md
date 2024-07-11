@@ -3,7 +3,7 @@
 
 ARMT is a memory-augmented segment-level recurrent Transformerm based on Recurrent Memory Transformer. It enhances the original RMT with capacious and flexible associative memory and achieves state-of-the-art scores on BABILong benchmark.
 
-> paper (coming soon) [code](https://github.com/RodkinIvan/associative-recurrent-memory-transformer) Associative Recurrent Memory Transformer
+> [paper](https://arxiv.org/abs/2407.04841), [code](https://github.com/RodkinIvan/associative-recurrent-memory-transformer) Associative Recurrent Memory Transformer
 
 
 Associative Recurrent Memory Transformer is implemented as follows:
@@ -52,5 +52,13 @@ If you find our work useful, please cite the RMT and ARMT papers:
 }
 ```
 ```
-ARMT paper bibtex coming soon
+@misc{rodkin2024associativerecurrentmemorytransformer,
+      title={Associative Recurrent Memory Transformer}, 
+      author={Ivan Rodkin and Yuri Kuratov and Aydar Bulatov and Mikhail Burtsev},
+      year={2024},
+      eprint={2407.04841},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2407.04841}, 
+}
 ```
