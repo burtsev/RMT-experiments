@@ -1,17 +1,14 @@
-# Recurrent Memory Transformer implementation compatible with Hugging Face models
+# Associative Recurrent Memory Transformer implementation compatible with Hugging Face models
 
 
-RMT is a memory-augmented segment-level recurrent Transformer. It achieves state-of-the art results on Hyperpartisan dataset and beats Transformer-XL on algorithmic tasks and LM with limited input and memory size.
+ARMT is a memory-augmented segment-level recurrent Transformerm based on Recurrent Memory Transformer. It enhances the original RMT with capacious and flexible associative memory and achieves state-of-the-art scores on BABILong benchmark.
 
->[paper](https://arxiv.org/abs/2304.11062) Scaling Transformer to 1M tokens and beyond with RMT
+> [paper](https://arxiv.org/abs/2407.04841), [code](https://github.com/RodkinIvan/associative-recurrent-memory-transformer) Associative Recurrent Memory Transformer
 
->[paper](https://arxiv.org/abs/2207.06881) [code](https://github.com/booydar/LM-RMT) Recurrent Memory Transformer
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/booydar/t5-experiments/blob/framework_accel/notebooks/rmt_demo_lm.ipynb) Example: LM with RMT
+Associative Recurrent Memory Transformer is implemented as follows:
 
-Recurrent Memory Transformer is implemented as follows:
-
-![**RMT**](img/RMT_scheme.png?raw=True)
+![**ARMT**](img/armt.png)
 
 We implement our memory mechanism with no changes to Transformer model by adding special memory tokens to the input sequence. The model is trained to control both memory operations and sequence representations processing.
 
@@ -32,7 +29,7 @@ pip install -r requirements.txt
 
 
 ## Citation
-If you find our work useful, please cite the RMT papers:
+If you find our work useful, please cite the RMT and ARMT papers:
 ```
 @inproceedings{
         bulatov2022recurrent,
@@ -52,5 +49,16 @@ If you find our work useful, please cite the RMT papers:
       eprint={2304.11062},
       archivePrefix={arXiv},
       primaryClass={cs.CL}
+}
+```
+```
+@misc{rodkin2024associativerecurrentmemorytransformer,
+      title={Associative Recurrent Memory Transformer}, 
+      author={Ivan Rodkin and Yuri Kuratov and Aydar Bulatov and Mikhail Burtsev},
+      year={2024},
+      eprint={2407.04841},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2407.04841}, 
 }
 ```

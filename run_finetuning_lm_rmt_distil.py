@@ -6,20 +6,20 @@ from pathlib import Path
 from itertools import chain
 import wandb
 # from dotenv import load_dotenv
+import random
 import torch
 import numpy as np
-import random
 import datasets
+from datasets import Dataset
 from torch.utils.data import DataLoader
 
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerateArgs as TrainerArgs
-from lm_experiments_tools.trainer_accelerate import TrainerAccelerate as Trainer
+from lm_experiments_tools import Trainer, TrainerArgs
 
 from torch.nn.utils.rnn import pad_sequence
 
 import accelerate
-from peft import get_peft_model, LoraConfig, TaskType
 
+from baselines.rwkv.RWKV_v5.src.dataflow.trie_tokenizer import MT_TRIE_TOKENIZER
 # load_dotenv()
 
 logger_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -49,6 +49,8 @@ from lm_experiments_tools.utils import get_cls_by_name, get_optimizer, prepare_r
 # torch.cuda.set_device(hvd.local_rank())
 
 parser = HfArgumentParser(TrainerArgs)
+
+parser.add_argument('--rwkv_tokenizer', type=str, default=None, help='path or name of pre-trained HF Tokenizer')
 parser.add_argument('--task_name', type=str, help="Task name, wikitext, ...")
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
@@ -69,16 +71,20 @@ parser.add_argument('--sliding_window', action='store_true', help='use slinding 
 
 # model args
 parser.add_argument('--from_pretrained', type=str, help='model name in HF Model Hub (default: "")')
+parser.add_argument('--pretrained_teacher', type=str, help='teacher model name in HF Model Hub (default: "")')
 parser.add_argument('--model_cfg', type=str, help='path to model configuration file (default: "")')
 parser.add_argument('--model_cls', type=str, default='transformers:BertForPreTraining',
                     help='model class name to use (default: transformers:BertForPreTraining)')
 parser.add_argument('--memory_cell_cls', type=str, default=None, help='cell class for RMT')
 parser.add_argument('--recurrent_wrapper_cls', type=str, default=None, help='recurrent wrapper class for RMT')
+parser.add_argument('--distillator_cls', type=str, default=None, help='distillator class for RMT')
+parser.add_argument('--teacher_cls', type=str, default=None, help='teacher class')
 parser.add_argument('--model_cpt', type=str, default=None, help='pretrained model checkpoint path')
 parser.add_argument('--model_type', type=str, default='encoder-decoder',
                     help='model type, encoder, encoder-decoder, decoder, affects preprocessing '
                          '(default: encoder-decoder)')
 
+parser.add_argument('--alpha_distil', type=float, default=None, help='')
 
 # Aydar # RMT args
 parser.add_argument('--input_size', type=int, default=None, help='maximal input size of the backbone model')
@@ -88,6 +94,8 @@ parser.add_argument('--d_mem', type=int, default=None, help='number of rows in a
 parser.add_argument('--max_n_segments', type=int, default=1, help='maximal segment number')
 parser.add_argument('--max_val_segments', type=int, default=1, help='maximal segment number on validation')
 parser.add_argument('--vary_n_segments', action='store_true', default=False, help='Randomly choose segment number from 1 to max_n_segments')
+parser.add_argument('--random_segment_size', action='store_true', default=False, help='Randomly choose segment size from input_size to max_n_segments * input_size with powers of 2')
+parser.add_argument('--prev_seg_kv', action='store_true', default=False, help='propagate kv from previous segment')
 parser.add_argument('--sum_loss', action='store_true', default=False,
                     help='with this flag task loss from all segments is summed')
 parser.add_argument('--bptt_depth', type=int, default=-1, help='max number of previous segments in gradient computation.')
@@ -166,9 +174,18 @@ if __name__ == '__main__':
     #     open(model_path / 'git.diff', 'w').write(get_git_diff())
 
     prepare_run(args, logger, logger_fmt)
-
     if args.tokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+
+        if args.tokenizer == 'RWKV/HF_v5-Eagle-7B':
+            tokenizer.unk_token = '<unk>'
+            tokenizer.unk_token_id = 65535
+    elif args.rwkv_tokenizer is not None:
+        tokenizer = MT_TRIE_TOKENIZER(args.rwkv_tokenizer)
+        tokenizer.__call__ = lambda text, *y: tokenizer.encode(text)
+        tokenizer.unk_token = '<unk>'
+        tokenizer.unk_token_id = 65535
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
 
@@ -177,7 +194,16 @@ if __name__ == '__main__':
 
     with accelerator.main_process_first():
         if 'wikitext' in args.task_name:
+            
+            def process_unk(x):
+                x['text'] = x['text'].replace('<unk>', tokenizer.unk_token)
+                return x
+    
             raw_datasets = datasets.load_dataset('wikitext', args.task_name)
+
+            # should it really be like this?
+            if 'wikitext-2' not in args.task_name:
+                raw_datasets = raw_datasets.map(process_unk)
             column_names = raw_datasets["train"].column_names
             text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -204,6 +230,7 @@ if __name__ == '__main__':
     else:
         val_history_size = history_size
 
+
     def group_texts(examples, block_size, history_size=None):
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
@@ -215,7 +242,7 @@ if __name__ == '__main__':
             }
         else:
             result = {
-                k: [t[max({0, i - history_size}) : i + block_size] for i in range(history_size, total_length, block_size)]
+                k: [t[max({0, i - history_size - block_size}) : i] for i in range(history_size + block_size, total_length, block_size)]
                 for k, t in concatenated_examples.items()
             }
         result["labels"] = result["input_ids"].copy()
@@ -235,7 +262,7 @@ if __name__ == '__main__':
 
             # make sliding window att mask
             attention_mask = attention_mask[:, None, :].repeat(1, attention_mask.shape[1], 1)
-            attention_mask = (torch.tril(attention_mask, 0) * (1 - torch.tril(attention_mask, -block_size)))
+            attention_mask = (torch.tril(attention_mask, 0) * (1 - torch.tril(torch.ones_like(attention_mask), -block_size)))
 
             collated = {'input_ids': input_ids,
                         'labels': labels, 
@@ -244,13 +271,19 @@ if __name__ == '__main__':
             if input_ids.shape[1] != block_size:
                 # take only labels for last block (maybe use all labels during training?)
                 labels_mask = torch.ones_like(input_ids, dtype=torch.bool)
-                # for i, lens in enumerate(input_lens):
-                    # labels_mask[i, max(lens - block_size, 0): lens] = True
+                for i, lens in enumerate(input_lens):
+                    labels_mask[i, max(lens - block_size, 0): lens] = True
                 collated['labels_mask'] = labels_mask
+
+            if getattr(args, 'vary_n_segments', False):
+                n_segments = random.randint(1, args.max_n_segments + 1)
+                n_tokens = n_segments * block_size
+                for k in collated:
+                    collated[k] = collated[k][:, -n_tokens:]
 
             return collated
     else:
-        def collate_fn(batch, batch_i=-1, num_batches=-1, valid=False):
+        def collate_fn(batch, valid=False):
             input_ids = [torch.tensor(b['input_ids'][::-1]) for b in batch]
             labels = [torch.tensor(b['labels'][::-1]) for b in batch]
             attention_mask = [torch.tensor(b['attention_mask'][::-1]) for b in batch]
@@ -264,28 +297,41 @@ if __name__ == '__main__':
 
             if input_ids.shape[1] != block_size:
                 labels_mask = torch.ones_like(input_ids, dtype=bool)
-                # if not valid:
-                    # labels_mask[:, :-block_size] = False
+                # labels_mask[:, :-block_size] = False
                 collated['labels_mask'] = labels_mask
-
-            # if valid:
-            #     collated['labels_mask'][0, :-block_size*(batch_i+1)] = False
-            #     collated['labels_mask'][-1, block_size*(num_batches-batch_i):] = False
-
-            # if getattr(args, 'vary_n_segments', False) and not valid:
-            #     n_segments = random.randint(1, args.max_n_segments)
-            #     n_tokens = n_segments * block_size
-            #     for k in collated:
-            #         collated[k] = collated[k][:, -n_tokens:]
+        
+            if getattr(args, 'vary_n_segments', False) and not valid:
+                n_segments = random.randint(1, args.max_n_segments + 1)
+                n_tokens = n_segments * block_size
+                for k in collated:
+                    collated[k] = collated[k][:, -n_tokens:]
+            if getattr(args, 'random_segment_size', False):
+                def is_power_of_two(n):
+                    if (n == 0):
+                        return False
+                    while (n != 1):
+                        if (n % 2 != 0):
+                            return False
+                        n = n // 2
+             
+                    return True
+                if valid:
+                    n_segments = args.max_val_segments
+                else:
+                    assert is_power_of_two(args.max_n_segments)
+                    power = int(math.log2(args.max_n_segments))
+                    logn_segments = random.randint(0, power)
+                    n_segments = 2 ** logn_segments
+                for k in collated:
+                    collated[k] = torch.stack(torch.chunk(collated[k], n_segments, dim=1), dim=1)
 
             return collated
 
     with accelerator.main_process_first():
+        # train_dataset = Dataset.from_dict(group_texts(tokenized_datasets['train'].to_dict(), block_size, history_size))
         train_dataset = tokenized_datasets["train"].map(lambda x: group_texts(x, block_size, history_size),
                                                         batched=True, desc=f"Grouping train in chunks of {block_size} and history {history_size}")
-        valid_dataset = tokenized_datasets["validation"].map(lambda x: group_texts(x, block_size, val_history_size), 
-                                                             batched=True, desc=f"Grouping valid in chunks of {block_size}")
-
+        valid_dataset = Dataset.from_dict(group_texts(tokenized_datasets['validation'].to_dict(), block_size, val_history_size))
     kwargs = {'pin_memory': True, 'num_workers': args.data_n_workers}
     # shuffle train data each epoch (one loop over train_dataset)
     per_worker_batch_size = args.batch_size * args.gradient_accumulation_steps
@@ -302,27 +348,31 @@ if __name__ == '__main__':
             all_inds = all_inds.reshape(self.batch_size, -1)
             for batch_ind in range(all_inds.shape[1]):
                 batch = [self.dataset[int(ind)] for ind in all_inds[:, batch_ind]]
-                yield self.collate_fn(batch, batch_ind, all_inds.size(1))
+                yield self.collate_fn(batch)
 
     # get validation dataset
     valid_dataloader = None
-    logger.info('preparing validation data from babilong')
+    logger.info(f'preparing validation data from {args.task_name}')
     valid_dataloader = alignedDataLoader(valid_dataset, batch_size=per_worker_batch_size,
-                                         collate_fn=lambda *x: collate_fn(*x, valid=True), shuffle=False, drop_last=True, **kwargs)
+                                         collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
 
     # get test dataset
+    
     if 'test' in tokenized_datasets.keys():
-        test_dataset = tokenized_datasets["test"].map(lambda x: group_texts(x, block_size, val_history_size),
-                                                      batched=True, desc=f"Grouping test in chunks of {block_size}")
+        with accelerator.main_process_first():
+            test_dataset = Dataset.from_dict(group_texts(tokenized_datasets['test'].to_dict(), block_size, val_history_size))
+
         test_dataloader = alignedDataLoader(test_dataset, batch_size=per_worker_batch_size,
-                                            collate_fn=lambda *x: collate_fn(*x, valid=True), shuffle=False, drop_last=True, **kwargs)
+                                            collate_fn=lambda x: collate_fn(x, valid=True), shuffle=False, drop_last=True, **kwargs)
+        
 
     if args.valid_interval is None:
         args.valid_interval = args.log_interval
 
     # define model
-    model_cls = get_cls_by_name(args.model_cls)
 
+    logger.info('starting with test')
+    model_cls = get_cls_by_name(args.model_cls)
     logger.info(f'Using model class: {model_cls}')
 
     if args.use_adapter:
@@ -349,7 +399,7 @@ if __name__ == '__main__':
             model = model_cls(config=model_cfg)
         else:
             logger.info(f'Loading pretrained model: {args.from_pretrained}')
-            model = model_cls.from_pretrained(args.from_pretrained, use_safetensors=False)
+            model = model_cls.from_pretrained(args.from_pretrained)
 
     if args.use_lora:
         peft_config = LoraConfig(
@@ -372,17 +422,23 @@ if __name__ == '__main__':
         logger.info(f'Loaded baseline state dict from: {args.backbone_cpt}')
 
     # Pass memory settings to pretrained model
-    if args.num_mem_tokens is not None:
+    if True:
         memory_cell_cls = get_cls_by_name(args.memory_cell_cls)
         recurrent_wrapper_cls = get_cls_by_name(args.recurrent_wrapper_cls)
+        if args.distillator_cls is not None:
+            distillator = get_cls_by_name(args.distillator_cls)
+
         logger.info(f'Wrapping in: {memory_cell_cls} and {recurrent_wrapper_cls}')
+        
         
         mem_cell_args = dict(
             base_model=model,
-            num_mem_tokens=args.num_mem_tokens,
         )
         if args.d_mem is not None:
             mem_cell_args['d_mem'] = args.d_mem
+        
+        if args.num_mem_tokens is not None:
+            mem_cell_args['num_mem_tokens'] = args.num_mem_tokens
 
         cell = memory_cell_cls(**mem_cell_args)
         model = recurrent_wrapper_cls(cell, 
@@ -391,7 +447,11 @@ if __name__ == '__main__':
                                       vary_n_segments=args.vary_n_segments,
                                       k2=args.k2,
         )
-                                    
+
+        if args.distillator_cls is not None:
+            teacher_cls = get_cls_by_name(args.teacher_cls)
+            teacher = teacher_cls.from_pretrained(args.pretrained_teacher)
+            model = distillator(teacher, model, alpha_distil=args.alpha_distil)             
 
         ## load cpt of rmt
         if args.model_cpt and args.model_cpt != 'None':
@@ -400,9 +460,14 @@ if __name__ == '__main__':
             model.load_state_dict(cpt, strict=False)
             logger.info(f'Loaded RMT state dict from: {args.model_cpt}')
 
+
+    def to_freeze(name):
+        if 'memory_cell'in name:
+            name = ''.join(name.split('memory_cell'))
+        return 'memory' not in name and 'lora' not in name and 'adapter' not in name and 'W_m' not in name
     if args.freeze_model_weights:
         for n, p in model.named_parameters():
-            if 'memory' not in n and 'lora' not in n and 'adapter' not in n:
+            if to_freeze(n):
                 p.requires_grad = False
             else:
                 p.requires_grad = True
@@ -425,7 +490,7 @@ if __name__ == '__main__':
 
     # todo: group optimizer params
     optimizer = optimizer_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)    
-    # if (args.model_cpt and args.model_cpt != 'None') or args.backbone_cpt:
+    # if args.model_cpt or args.backbone_cpt:
         # optimizer.load_state_dict(cpt['optimizer_state_dict'])
 
     # for encoder only classification
@@ -437,6 +502,8 @@ if __name__ == '__main__':
         data['predictions'] = torch.argmax(output['logits'].detach(), dim=-1)
         if 'ce_loss' in output:
             data['ce_loss'] = output['ce_loss']
+        if 'dist' in output:
+            data['dist'] = output['dist']
         
         for i in range(args.max_n_segments):
             if f'ce_loss_{i}' in output:
@@ -478,12 +545,14 @@ if __name__ == '__main__':
                 perplexity = float("inf")
 
             metrics["perplexity"] = perplexity
-
-
+        
+        if 'dist' in data:
+            metrics['dist'] = data['dist'].mean()
+            
         for i in range(args.max_n_segments):
             if f'ce_loss_{i}' in data:
                 metrics[f'ce_loss_{i}'] = data[f'ce_loss_{i}'].mean()
-        
+
 
         return metrics
 
@@ -496,6 +565,10 @@ if __name__ == '__main__':
     trainer = Trainer(args, accelerator, model, optimizer, train_dataloader, valid_dataloader,  # train_sampler,
                       keep_for_metrics_fn=keep_for_metrics_fn, metrics_fn=metrics_fn,
                       batch_metrics_fn=batch_metrics_fn,
+                      forward_kwargs={
+                          'input_segmented': getattr(args, 'random_segment_size', False),
+                          'sliding_window': getattr(args, 'prev_seg_kv', False)
+                      },
                       generate_kwargs={})
 
     if not args.validate_only:
@@ -534,14 +607,11 @@ if __name__ == '__main__':
                 table = wandb.Table(data=np.vstack([evaluated_on, metric_on]).T, columns=['evaluated_on', 'test/ce_loss'])
                 line = trainer.run.plot_table("wandb/line/v0", table, {"x":'evaluated_on', "y":'test/ce_loss'})
                 trainer.run.log({'per_segment_test': line})
-
         trainer.save_metrics(save_path=args.model_path)
-
-
     else:
         # run validation, do not write to tensorboard
         logger.info('Running validation on train set:')
-        trainer.validate(train_dataloader, split='train', write_tb=False)
+        trainer.validate(train_dataloader, split='train', write_tb=True)
         if valid_dataloader is not None:
             logger.info('Running validation on valid data:')
             trainer.validate(valid_dataloader, write_tb=False, split='valid')
