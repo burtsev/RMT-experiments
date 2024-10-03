@@ -418,7 +418,7 @@ class GPT2Block(nn.Module):
         output_attentions=False,
     ):
         if self.layer_idx == 0:
-            residual = torch.zeros_like(hidden_states)
+            residual = torch.ones_like(hidden_states)
         else:
             residual = hidden_states
             
