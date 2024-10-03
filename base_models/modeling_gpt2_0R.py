@@ -384,6 +384,7 @@ class GPT2MLP(nn.Module):
 class GPT2Block(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
+        self.layer_idx = layer_idx  # Store layer index
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
@@ -416,7 +417,11 @@ class GPT2Block(nn.Module):
         use_cache=False,
         output_attentions=False,
     ):
-        residual = hidden_states
+        if self.layer_idx == 0:
+            residual = torch.zeros_like(hidden_states)
+        else:
+            residual = hidden_states
+            
         hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
             hidden_states,
